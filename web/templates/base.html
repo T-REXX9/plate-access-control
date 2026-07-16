@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>{% block title %}Gatekeeper{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="{{ url_for('static', filename='notifications.js') }}" defer></script>
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
