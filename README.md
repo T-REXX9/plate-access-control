@@ -110,6 +110,8 @@ registered-vehicle entry and editing, active/inactive authorization controls,
 the complete searchable access log, event snapshots, and CSV export. Starting
 the website also starts the real-time camera reader in headless mode. Its
 annotated feed appears on the dashboard instead of opening a separate window.
+The dashboard stream is capped at 5 FPS to reduce Raspberry Pi CPU, disk, and
+network use without slowing the internal detection loop.
 Recognized registered vehicles are labeled with both the plate and owner, for
 example `ZAT255 Melson Bacuen`.
 

@@ -626,6 +626,7 @@ int runCamera(
 
     constexpr int ocrInterval = 8;
     constexpr int trackLifetime = 15;
+    constexpr auto liveFrameInterval = std::chrono::milliseconds(200); // 5 FPS
     std::vector<LiveTrack> tracks;
     cv::Mat motionBackground;
     int motionCalibrationFrames = 0;
@@ -786,7 +787,8 @@ int runCamera(
                 : smoothedFps * 0.90 + instantaneousFps * 0.10;
         }
         std::ostringstream status;
-        status << std::fixed << std::setprecision(1) << smoothedFps << " FPS | ";
+        status << std::fixed << std::setprecision(1) << smoothedFps
+               << " processing FPS | WEB 5 FPS | ";
         if (!calibrated) {
             status << "CALIBRATING - keep gate clear";
         } else if (modelsActive) {
@@ -814,9 +816,9 @@ int runCamera(
             cv::LINE_AA
         );
 
-        if (currentTime - lastLiveFrame >= std::chrono::milliseconds(100)) {
+        if (currentTime - lastLiveFrame >= liveFrameInterval) {
             publishLiveFrame(frame, liveFramePath);
-            lastLiveFrame = currentTime;
+            lastLiveFrame = std::chrono::steady_clock::now();
         }
 
         if (!headless) {
