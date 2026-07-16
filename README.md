@@ -109,11 +109,12 @@ the administrator username and password. The site includes the live summary,
 registered-vehicle entry and editing, active/inactive authorization controls,
 the complete searchable access log, event snapshots, and CSV export. Starting
 the website also starts the real-time camera reader in headless mode. Its
-annotated feed appears on the dashboard instead of opening a separate window.
-The dashboard stream is capped at 5 FPS to reduce Raspberry Pi CPU, disk, and
-network use without slowing the internal detection loop.
+latest annotated event photo appears on the dashboard instead of opening a
+separate camera window or continuously streaming video. A new photo is saved
+whenever a stable plate reading produces a granted or denied access event.
 Recognized registered vehicles are labeled with both the plate and owner, for
-example `ZAT255 Melson Bacuen`.
+example `ZAT255 Melson Bacuen`; denied unregistered vehicles retain the plate
+annotation without an owner name.
 
 Camera index `0` is used by default. To use another camera, run:
 

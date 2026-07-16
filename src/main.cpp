@@ -574,23 +574,6 @@ std::string eventSnapshotName(const std::string& plate, int frameNumber) {
     return name.str();
 }
 
-bool publishLiveFrame(const cv::Mat& frame, const fs::path& target) {
-    const fs::path temporary = target.parent_path() /
-        (target.stem().string() + ".tmp" + target.extension().string());
-    if (!cv::imwrite(temporary.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 78})) {
-        return false;
-    }
-    std::error_code error;
-    fs::rename(temporary, target, error);
-    if (!error) {
-        return true;
-    }
-    fs::remove(target, error);
-    error.clear();
-    fs::rename(temporary, target, error);
-    return !error;
-}
-
 int runCamera(
     cv::dnn::Net& detector,
     cv::dnn::Net& recognizer,
@@ -626,14 +609,11 @@ int runCamera(
 
     constexpr int ocrInterval = 8;
     constexpr int trackLifetime = 15;
-    constexpr auto liveFrameInterval = std::chrono::milliseconds(200); // 5 FPS
     std::vector<LiveTrack> tracks;
     cv::Mat motionBackground;
     int motionCalibrationFrames = 0;
     auto activeUntil = std::chrono::steady_clock::time_point::min();
     auto lastStatusUpdate = std::chrono::steady_clock::now() - std::chrono::seconds(2);
-    auto lastLiveFrame = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-    const fs::path liveFramePath = outputDirectory / "live-feed.jpg";
     int frameNumber = 0;
     double smoothedFps = 0.0;
     auto previousTime = std::chrono::steady_clock::now();
@@ -787,8 +767,7 @@ int runCamera(
                 : smoothedFps * 0.90 + instantaneousFps * 0.10;
         }
         std::ostringstream status;
-        status << std::fixed << std::setprecision(1) << smoothedFps
-               << " processing FPS | WEB 5 FPS | ";
+        status << std::fixed << std::setprecision(1) << smoothedFps << " FPS | ";
         if (!calibrated) {
             status << "CALIBRATING - keep gate clear";
         } else if (modelsActive) {
@@ -815,11 +794,6 @@ int runCamera(
             2,
             cv::LINE_AA
         );
-
-        if (currentTime - lastLiveFrame >= liveFrameInterval) {
-            publishLiveFrame(frame, liveFramePath);
-            lastLiveFrame = std::chrono::steady_clock::now();
-        }
 
         if (!headless) {
             cv::imshow("Real-time License Plate Recognition", frame);

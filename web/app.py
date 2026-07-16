@@ -7,7 +7,6 @@ import os
 import re
 import secrets
 import sqlite3
-import time
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -33,7 +32,6 @@ DATABASE_DIR = PROJECT_DIR / "database"
 DATABASE_PATH = DATABASE_DIR / "gate_access.db"
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
 SECRET_PATH = DATABASE_DIR / "web_secret.key"
-LIVE_FRAME_PATH = PROJECT_DIR / "Output" / "live-feed.jpg"
 
 
 def load_secret_key() -> str:
@@ -244,6 +242,18 @@ def dashboard():
         LIMIT 10
         """
     ).fetchall()
+    latest_event = connection.execute(
+        """
+        SELECT e.id, e.plate_number, e.decision,
+               datetime(e.detected_at, 'localtime') AS local_time,
+               v.owner_name
+        FROM access_events e
+        LEFT JOIN vehicles v ON v.id = e.vehicle_id
+        WHERE e.image_path IS NOT NULL AND e.image_path != ''
+        ORDER BY e.detected_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
     daily = connection.execute(
         """
         SELECT event_date, total_events, authorized_count, denied_count, gates_opened
@@ -257,42 +267,9 @@ def dashboard():
         "dashboard.html",
         summary=summary,
         recent_events=recent_events,
+        latest_event=latest_event,
         daily=daily,
         system=system,
-    )
-
-
-def generate_live_feed():
-    last_modified_ns = -1
-    while True:
-        try:
-            modified_ns = LIVE_FRAME_PATH.stat().st_mtime_ns
-            if modified_ns == last_modified_ns:
-                time.sleep(0.05)
-                continue
-            frame = LIVE_FRAME_PATH.read_bytes()
-            last_modified_ns = modified_ns
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n" +
-                frame + b"\r\n"
-            )
-        except (FileNotFoundError, OSError):
-            time.sleep(0.20)
-
-
-@app.route("/live-feed")
-@login_required
-def live_feed():
-    return Response(
-        generate_live_feed(),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
     )
 
 

@@ -38,7 +38,6 @@ if [[ "${START_CAMERA:-1}" != "0" ]]; then
     fi
     if [[ -x "$reader" ]]; then
         mkdir -p "$project_dir/Output"
-        rm -f "$project_dir/Output/live-feed.jpg"
         cd "$project_dir"
         "$reader" --camera "${CAMERA_INDEX:-0}" \
             models/license_plate_detector.onnx \
