@@ -86,7 +86,7 @@ button { cursor: pointer; }
 .live-feed-panel .panel-heading p { color: #aebbb2; }
 .live-badge { display: inline-flex; align-items: center; gap: 7px; color: #bfe8ca; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
 .live-badge span { width: 8px; height: 8px; border-radius: 50%; background: #43ce6b; box-shadow: 0 0 0 5px rgba(67,206,107,.14); }
-.camera-frame { position: relative; display: grid; place-items: center; min-height: 320px; aspect-ratio: 16 / 9; overflow: hidden; background: #090d0a; }
+.camera-frame { position: relative; display: grid; place-items: center; width: min(100%, 800px); margin: 0 auto; aspect-ratio: 16 / 9; overflow: hidden; background: #090d0a; }
 .camera-frame img { position: relative; z-index: 2; display: block; width: 100%; height: 100%; object-fit: contain; }
 .camera-placeholder { position: absolute; inset: 0; display: grid; place-content: center; gap: 8px; color: #d8e1da; text-align: center; }
 .camera-placeholder span { color: #87938b; font-size: 12px; }
