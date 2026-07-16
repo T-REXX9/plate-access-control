@@ -107,7 +107,23 @@ Install the small website environment once, then start it:
 Open `http://localhost:8080` on the same computer. On the first visit, create
 the administrator username and password. The site includes the live summary,
 registered-vehicle entry and editing, active/inactive authorization controls,
-the complete searchable access log, event snapshots, and CSV export.
+the complete searchable access log, event snapshots, and CSV export. Starting
+the website also starts the real-time camera reader in headless mode. Its
+annotated feed appears on the dashboard instead of opening a separate window.
+Recognized registered vehicles are labeled with both the plate and owner, for
+example `ZAT255 Melson Bacuen`.
+
+Camera index `0` is used by default. To use another camera, run:
+
+```bash
+CAMERA_INDEX=1 ./web/start_web.sh
+```
+
+For website-only maintenance without opening a camera, run:
+
+```bash
+START_CAMERA=0 ./web/start_web.sh
+```
 
 After copying the complete folder to a Raspberry Pi, run
 `./build_raspberry_pi.sh`; it installs the Pi dependencies and rebuilds the web

@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ DATABASE_DIR = PROJECT_DIR / "database"
 DATABASE_PATH = DATABASE_DIR / "gate_access.db"
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
 SECRET_PATH = DATABASE_DIR / "web_secret.key"
+LIVE_FRAME_PATH = PROJECT_DIR / "Output" / "live-feed.jpg"
 
 
 def load_secret_key() -> str:
@@ -257,6 +259,40 @@ def dashboard():
         recent_events=recent_events,
         daily=daily,
         system=system,
+    )
+
+
+def generate_live_feed():
+    last_modified_ns = -1
+    while True:
+        try:
+            modified_ns = LIVE_FRAME_PATH.stat().st_mtime_ns
+            if modified_ns == last_modified_ns:
+                time.sleep(0.05)
+                continue
+            frame = LIVE_FRAME_PATH.read_bytes()
+            last_modified_ns = modified_ns
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n" +
+                frame + b"\r\n"
+            )
+        except (FileNotFoundError, OSError):
+            time.sleep(0.20)
+
+
+@app.route("/live-feed")
+@login_required
+def live_feed():
+    return Response(
+        generate_live_feed(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

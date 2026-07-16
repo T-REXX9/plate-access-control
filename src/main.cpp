@@ -41,6 +41,7 @@ struct Detection {
 struct LiveTrack {
     cv::Rect box;
     std::string label;
+    std::string ownerName;
     std::vector<std::string> readings;
     std::string loggedLabel;
     bool authorizationKnown = false;
@@ -408,6 +409,7 @@ bool updateMotionGate(
 struct AuthorizationResult {
     bool authorized = false;
     int vehicleId = -1;
+    std::string ownerName;
 };
 
 class GateDatabase {
@@ -450,7 +452,7 @@ public:
         }
         sqlite3_stmt* statement = nullptr;
         constexpr const char* sql =
-            "SELECT id FROM vehicles "
+            "SELECT id, owner_name FROM vehicles "
             "WHERE plate_number = ? AND is_active = 1 "
             "AND (registration_expires_on IS NULL OR registration_expires_on = '' "
             "OR date(registration_expires_on) >= date('now', 'localtime')) "
@@ -460,6 +462,10 @@ public:
             if (sqlite3_step(statement) == SQLITE_ROW) {
                 result.authorized = true;
                 result.vehicleId = sqlite3_column_int(statement, 0);
+                const unsigned char* owner = sqlite3_column_text(statement, 1);
+                if (owner) {
+                    result.ownerName = reinterpret_cast<const char*>(owner);
+                }
             }
         }
         sqlite3_finalize(statement);
@@ -568,12 +574,30 @@ std::string eventSnapshotName(const std::string& plate, int frameNumber) {
     return name.str();
 }
 
+bool publishLiveFrame(const cv::Mat& frame, const fs::path& target) {
+    const fs::path temporary = target.parent_path() /
+        (target.stem().string() + ".tmp" + target.extension().string());
+    if (!cv::imwrite(temporary.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 78})) {
+        return false;
+    }
+    std::error_code error;
+    fs::rename(temporary, target, error);
+    if (!error) {
+        return true;
+    }
+    fs::remove(target, error);
+    error.clear();
+    fs::rename(temporary, target, error);
+    return !error;
+}
+
 int runCamera(
     cv::dnn::Net& detector,
     cv::dnn::Net& recognizer,
     int cameraIndex,
     const fs::path& outputDirectory,
-    const fs::path& databasePath
+    const fs::path& databasePath,
+    bool headless
 ) {
     cv::VideoCapture camera;
 #ifdef __APPLE__
@@ -607,12 +631,18 @@ int runCamera(
     int motionCalibrationFrames = 0;
     auto activeUntil = std::chrono::steady_clock::time_point::min();
     auto lastStatusUpdate = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+    auto lastLiveFrame = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    const fs::path liveFramePath = outputDirectory / "live-feed.jpg";
     int frameNumber = 0;
     double smoothedFps = 0.0;
     auto previousTime = std::chrono::steady_clock::now();
 
-    cv::namedWindow("Real-time License Plate Recognition", cv::WINDOW_NORMAL);
-    std::cout << "Camera started. Press Q or Esc to quit; press S to save a snapshot.\n";
+    if (!headless) {
+        cv::namedWindow("Real-time License Plate Recognition", cv::WINDOW_NORMAL);
+    }
+    std::cout << "Camera started"
+              << (headless ? " in website-stream mode.\n"
+                           : ". Press Q or Esc to quit; press S to save a snapshot.\n");
     while (true) {
         cv::Mat frame;
         if (!camera.read(frame) || frame.empty()) {
@@ -688,16 +718,21 @@ int runCamera(
                 authorization = gateDatabase.authorize(track.label);
                 track.authorizationKnown = true;
                 track.authorized = authorization.authorized;
+                track.ownerName = authorization.ownerName;
                 recordAccess = true;
             }
 
             const cv::Scalar labelColor = !track.authorizationKnown
                 ? cv::Scalar(0, 200, 255)
                 : (track.authorized ? cv::Scalar(0, 210, 0) : cv::Scalar(0, 0, 230));
+            std::string displayLabel = track.label.empty() ? "READING" : track.label;
+            if (!track.ownerName.empty()) {
+                displayLabel += " " + track.ownerName;
+            }
             drawLabel(
                 frame,
                 detection.box,
-                track.label.empty() ? "READING" : track.label,
+                displayLabel,
                 labelColor
             );
 
@@ -759,7 +794,9 @@ int runCamera(
         } else {
             status << "IDLE - waiting for gate motion";
         }
-        status << " | Q: quit | S: snapshot";
+        if (!headless) {
+            status << " | Q: quit | S: snapshot";
+        }
         cv::rectangle(
             frame,
             gateRegion,
@@ -777,28 +814,42 @@ int runCamera(
             cv::LINE_AA
         );
 
-        cv::imshow("Real-time License Plate Recognition", frame);
-        const int key = cv::waitKey(1) & 0xFF;
-        if (key == 'q' || key == 'Q' || key == 27) {
-            break;
+        if (currentTime - lastLiveFrame >= std::chrono::milliseconds(100)) {
+            publishLiveFrame(frame, liveFramePath);
+            lastLiveFrame = currentTime;
         }
-        if (key == 's' || key == 'S') {
-            const fs::path target = outputDirectory /
-                ("camera-" + std::to_string(frameNumber) + ".jpg");
-            cv::imwrite(target.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 95});
-            std::cout << "Saved " << target.string() << '\n';
+
+        if (!headless) {
+            cv::imshow("Real-time License Plate Recognition", frame);
+            const int key = cv::waitKey(1) & 0xFF;
+            if (key == 'q' || key == 'Q' || key == 27) {
+                break;
+            }
+            if (key == 's' || key == 'S') {
+                const fs::path target = outputDirectory /
+                    ("camera-" + std::to_string(frameNumber) + ".jpg");
+                cv::imwrite(target.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 95});
+                std::cout << "Saved " << target.string() << '\n';
+            }
         }
     }
 
     camera.release();
     gateDatabase.updateStatus("offline", "stopped");
-    cv::destroyAllWindows();
+    if (!headless) {
+        cv::destroyAllWindows();
+    }
     return 0;
 }
 #endif
 
 int main(int argc, char** argv) {
     const bool cameraMode = argc > 1 && std::string(argv[1]) == "--camera";
+    const bool headless = std::find_if(
+        argv + 1,
+        argv + argc,
+        [](const char* argument) { return std::string(argument) == "--headless"; }
+    ) != argv + argc;
     const int cameraIndex = cameraMode && argc > 2 ? std::stoi(argv[2]) : 0;
     const fs::path inputDirectory = cameraMode
         ? "raw-images"
@@ -826,7 +877,7 @@ int main(int argc, char** argv) {
 
     if (cameraMode) {
 #ifdef PLATE_ENABLE_CAMERA
-        return runCamera(detector, recognizer, cameraIndex, outputDirectory, databasePath);
+        return runCamera(detector, recognizer, cameraIndex, outputDirectory, databasePath, headless);
 #else
         std::cerr << "Camera support was disabled when this executable was built.\n";
         return 1;
