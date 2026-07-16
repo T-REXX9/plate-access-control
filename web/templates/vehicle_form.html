@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit vehicle' if editing else 'Register vehicle' }} · Gatekeeper{% endblock %}
+{% block content %}
+<div class="page-heading compact-heading">
+  <div><p class="eyebrow">Vehicle registry</p><h1>{{ 'Edit vehicle' if editing else 'Register a vehicle' }}</h1><p>Plate values are stored as uppercase letters and digits without spaces or hyphens.</p></div>
+  <a class="secondary-button" href="{{ url_for('vehicles') }}">Back to vehicles</a>
+</div>
+
+<form method="post" class="panel form-panel">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <fieldset><legend>Identification</legend><div class="form-grid">
+    <label>Plate number <span>*</span><input name="plate_number" value="{{ vehicle.plate_number or '' }}" maxlength="20" placeholder="ABC1234" required></label>
+    <label>Owner name <span>*</span><input name="owner_name" value="{{ vehicle.owner_name or '' }}" required></label>
+    <label>Vehicle type<select name="vehicle_type"><option value="">Select type</option>{% for type in ['Car','SUV','Van','Truck','Motorcycle','Bus','Other'] %}<option {{ 'selected' if vehicle.vehicle_type == type else '' }}>{{ type }}</option>{% endfor %}</select></label>
+    <label>Color<input name="color" value="{{ vehicle.color or '' }}"></label>
+  </div></fieldset>
+  <fieldset><legend>Vehicle details</legend><div class="form-grid">
+    <label>Make<input name="make" value="{{ vehicle.make or '' }}" placeholder="Toyota"></label>
+    <label>Model<input name="model" value="{{ vehicle.model or '' }}" placeholder="Corolla"></label>
+    <label>Registration expiry<input type="date" name="registration_expires_on" value="{{ vehicle.registration_expires_on or '' }}"></label>
+    <label>Photo path<input name="photo_path" value="{{ vehicle.photo_path or '' }}" placeholder="Optional local file path"></label>
+  </div></fieldset>
+  <fieldset><legend>Contact and notes</legend><div class="form-grid">
+    <label>Contact number<input name="contact_number" value="{{ vehicle.contact_number or '' }}"></label>
+    <label>Email<input type="email" name="email" value="{{ vehicle.email or '' }}"></label>
+    <label class="full-field">Notes<textarea name="notes" rows="4">{{ vehicle.notes or '' }}</textarea></label>
+  </div></fieldset>
+  <div class="form-actions"><a class="secondary-button" href="{{ url_for('vehicles') }}">Cancel</a><button class="primary-button" type="submit">{{ 'Save changes' if editing else 'Register vehicle' }}</button></div>
+</form>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Access log · Gatekeeper{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">Recognition history</p><h1>Complete access log</h1><p>Every recognized plate with owner, timestamp, decision and gate action.</p></div>
+  <a class="secondary-button" href="{{ url_for('logs_export', plate=filters.get('plate',''), decision=filters.get('decision',''), date_from=filters.get('date_from',''), date_to=filters.get('date_to','')) }}">Export CSV</a>
+</div>
+
+<section class="panel">
+  <form class="filter-grid" method="get">
+    <label>Plate contains<input name="plate" value="{{ filters.get('plate','') }}" placeholder="ABC123"></label>
+    <label>Decision<select name="decision"><option value="">All decisions</option>{% for value in ['authorized','denied','unreadable','manual'] %}<option value="{{ value }}" {{ 'selected' if filters.get('decision') == value else '' }}>{{ value | title }}</option>{% endfor %}</select></label>
+    <label>From<input type="date" name="date_from" value="{{ filters.get('date_from','') }}"></label>
+    <label>To<input type="date" name="date_to" value="{{ filters.get('date_to','') }}"></label>
+    <button class="primary-button" type="submit">Apply filters</button>
+    <a class="text-link" href="{{ url_for('logs') }}">Reset</a>
+  </form>
+  <div class="result-count">{{ total }} event{{ '' if total == 1 else 's' }}</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Timestamp</th><th>Plate</th><th>Person / vehicle</th><th>Direction</th><th>Decision</th><th>Gate</th><th>Snapshot</th></tr></thead>
+      <tbody>
+      {% for event in events %}
+        <tr>
+          <td class="nowrap">{{ event.local_time }}</td>
+          <td><span class="plate">{{ event.plate_number }}</span></td>
+          <td><strong>{{ event.owner_name or 'Unknown vehicle' }}</strong><small class="cell-note">{{ [event.color, event.make, event.model] | select | join(' ') or event.vehicle_type or '' }}</small></td>
+          <td>{{ event.direction | title }}</td>
+          <td><span class="status {{ event.decision }}">{{ event.decision }}</span></td>
+          <td>{{ event.gate_action | replace('_',' ') | title }}</td>
+          <td>{% if event.image_path %}<a href="{{ url_for('event_image', event_id=event.id) }}" target="_blank" rel="noopener">View</a>{% else %}—{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7"><div class="empty-state"><strong>No matching events</strong><span>Try changing the filters or wait for the first recognition.</span></div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pages > 1 %}
+  <nav class="pagination" aria-label="Access log pages">
+    {% if page > 1 %}<a href="{{ url_for('logs', page=page-1, plate=filters.get('plate',''), decision=filters.get('decision',''), date_from=filters.get('date_from',''), date_to=filters.get('date_to','')) }}">Previous</a>{% endif %}
+    <span>Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a href="{{ url_for('logs', page=page+1, plate=filters.get('plate',''), decision=filters.get('decision',''), date_from=filters.get('date_from',''), date_to=filters.get('date_to','')) }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}

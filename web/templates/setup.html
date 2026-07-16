@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Create administrator · Gatekeeper{% endblock %}
+{% block body_class %}auth-page{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <div class="auth-badge">GK</div>
+  <p class="eyebrow">First-time setup</p>
+  <h1>Create the administrator account</h1>
+  <p class="muted">This account controls registered vehicles and can view the complete gate history.</p>
+  <form method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Username<input name="username" minlength="3" autocomplete="username" required autofocus></label>
+    <label>Password<input type="password" name="password" minlength="10" autocomplete="new-password" required></label>
+    <label>Confirm password<input type="password" name="confirmation" minlength="10" autocomplete="new-password" required></label>
+    <button class="primary-button full" type="submit">Create administrator</button>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Overview · Gatekeeper{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">Live operations</p><h1>Gate overview</h1><p>Today’s access activity and system health. Updates every 15 seconds.</p></div>
+  <a class="primary-button" href="{{ url_for('vehicle_new') }}">+ Register vehicle</a>
+</div>
+
+<section class="metric-grid" aria-label="Today’s summary">
+  <article class="metric-card"><span>Active vehicles</span><strong>{{ summary.active_vehicles }}</strong><small>Allowed registrations</small></article>
+  <article class="metric-card accent"><span>Entries today</span><strong>{{ summary.events_today }}</strong><small>All recognition events</small></article>
+  <article class="metric-card success"><span>Authorized</span><strong>{{ summary.authorized_today }}</strong><small>Approved today</small></article>
+  <article class="metric-card danger"><span>Denied</span><strong>{{ summary.denied_today }}</strong><small>Rejected today</small></article>
+</section>
+
+<div class="dashboard-grid">
+  <section class="panel wide-panel">
+    <div class="panel-heading"><div><h2>Recent access</h2><p>Latest vehicles seen at the gate</p></div><a href="{{ url_for('logs') }}">View all</a></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Plate</th><th>Owner</th><th>Vehicle</th><th>Decision</th></tr></thead>
+        <tbody>
+        {% for event in recent_events %}
+          <tr>
+            <td class="nowrap">{{ event.local_time }}</td>
+            <td><span class="plate">{{ event.plate_number }}</span></td>
+            <td>{{ event.owner_name or 'Unknown vehicle' }}</td>
+            <td>{{ [event.make, event.model] | select | join(' ') or event.vehicle_type or '—' }}</td>
+            <td><span class="status {{ event.decision }}">{{ event.decision }}</span></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5"><div class="empty-state"><strong>No access events yet</strong><span>Recognition events will appear here automatically.</span></div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <aside class="panel system-panel">
+    <div class="panel-heading"><div><h2>System status</h2><p>Local Raspberry Pi services</p></div></div>
+    <dl class="status-list">
+      <div><dt>Camera</dt><dd><span class="indicator {{ 'online' if system.camera_state == 'online' else 'offline' }}"></span>{{ system.camera_state | title }}</dd></div>
+      <div><dt>Detector</dt><dd><span class="indicator {{ 'online' if system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span>{{ system.detector_state | title }}</dd></div>
+      <div><dt>Gate</dt><dd><span class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span>{{ system.gate_state | title }}</dd></div>
+      <div><dt>Last plate</dt><dd>{{ system.last_plate or 'None' }}</dd></div>
+      <div><dt>Heartbeat</dt><dd>{{ system.last_heartbeat or 'Not connected' }}</dd></div>
+    </dl>
+  </aside>
+
+  <section class="panel full-panel">
+    <div class="panel-heading"><div><h2>Seven-day activity</h2><p>Daily authorized and denied events</p></div></div>
+    <div class="day-grid">
+      {% for day in daily %}
+      <div class="day-card"><strong>{{ day.event_date }}</strong><span>{{ day.total_events }} total</span><small>{{ day.authorized_count }} authorized · {{ day.denied_count }} denied</small></div>
+      {% else %}
+      <p class="muted">Daily summaries will appear after the first recognition event.</p>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}
