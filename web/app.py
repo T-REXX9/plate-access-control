@@ -100,30 +100,33 @@ def normalize_plate(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", value.upper())
 
 
-def camera_pid() -> int | None:
-    try:
-        value = int(CAMERA_PID_PATH.read_text(encoding="utf-8").strip())
-        return value if value > 1 else None
-    except (FileNotFoundError, ValueError, OSError):
-        return None
-
-
-def camera_process_running() -> bool:
-    pid = camera_pid()
-    if pid is None:
-        return False
+def camera_processes() -> list[int]:
+    reader_commands = (
+        f"{PROJECT_DIR / 'build' / 'plate_reader'} --camera",
+        f"{PROJECT_DIR / 'build-pi' / 'plate_reader'} --camera",
+    )
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-axo", "pid=,command="],
             capture_output=True,
             text=True,
             timeout=2,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    command = result.stdout
-    return result.returncode == 0 and "plate_reader" in command and "--camera" in command
+        return []
+    processes: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if any(parts[1].startswith(command) for command in reader_commands):
+            processes.append(int(parts[0]))
+    return processes
+
+
+def camera_process_running() -> bool:
+    return bool(camera_processes())
 
 
 def set_camera_status(camera_state: str, detector_state: str) -> None:
@@ -142,7 +145,9 @@ def set_camera_status(camera_state: str, detector_state: str) -> None:
 
 
 def start_camera_process() -> tuple[bool, str]:
-    if camera_process_running():
+    existing = camera_processes()
+    if existing:
+        CAMERA_PID_PATH.write_text(str(existing[0]), encoding="utf-8")
         return True, "Camera recognition is already running."
     reader = PROJECT_DIR / "build" / "plate_reader"
     pi_reader = PROJECT_DIR / "build-pi" / "plate_reader"
@@ -172,18 +177,19 @@ def start_camera_process() -> tuple[bool, str]:
 
 
 def stop_camera_process() -> tuple[bool, str]:
-    pid = camera_pid()
-    if pid is None or not camera_process_running():
+    processes = camera_processes()
+    if not processes:
         CAMERA_PID_PATH.unlink(missing_ok=True)
         set_camera_status("offline", "stopped")
         return True, "Camera recognition is already stopped."
     try:
-        os.kill(pid, signal.SIGTERM)
+        for pid in processes:
+            os.kill(pid, signal.SIGTERM)
         for _ in range(20):
-            if not camera_process_running():
+            if not camera_processes():
                 break
             time.sleep(0.05)
-        if camera_process_running():
+        for pid in camera_processes():
             os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass

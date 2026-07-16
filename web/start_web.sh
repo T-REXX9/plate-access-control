@@ -17,21 +17,28 @@ camera_pid=""
 web_pid=""
 camera_pid_file="$project_dir/Output/camera.pid"
 
+camera_process_ids() {
+    while read -r process_id process_command; do
+        if [[ "$process_command" == "$project_dir/build/plate_reader --camera"* ]] ||
+           [[ "$process_command" == "$project_dir/build-pi/plate_reader --camera"* ]]; then
+            echo "$process_id"
+        fi
+    done < <(ps -axo pid=,command=)
+}
+
 cleanup() {
     trap - EXIT INT TERM
     if [[ -n "$web_pid" ]] && kill -0 "$web_pid" 2>/dev/null; then
         kill "$web_pid" 2>/dev/null || true
         wait "$web_pid" 2>/dev/null || true
     fi
-    if [[ -f "$camera_pid_file" ]]; then
-        active_camera_pid="$(<"$camera_pid_file")"
-        active_camera_command="$(ps -p "$active_camera_pid" -o command= 2>/dev/null || true)"
-        if [[ "$active_camera_command" == *plate_reader* ]] &&
-           [[ "$active_camera_command" == *--camera* ]]; then
-            kill "$active_camera_pid" 2>/dev/null || true
-            wait "$active_camera_pid" 2>/dev/null || true
-        fi
-    fi
+    while read -r active_camera_pid; do
+        kill "$active_camera_pid" 2>/dev/null || true
+    done < <(camera_process_ids)
+    sleep 0.1
+    while read -r active_camera_pid; do
+        kill -9 "$active_camera_pid" 2>/dev/null || true
+    done < <(camera_process_ids)
     rm -f "$camera_pid_file"
 }
 trap cleanup EXIT INT TERM
@@ -43,13 +50,16 @@ if [[ "${START_CAMERA:-1}" != "0" ]]; then
     fi
     if [[ -x "$reader" ]]; then
         mkdir -p "$project_dir/Output"
-        cd "$project_dir"
-        "$reader" --camera "${CAMERA_INDEX:-0}" \
-            models/license_plate_detector.onnx \
-            models/en_PP-OCRv5_rec_mobile.onnx \
-            Output database/gate_access.db --headless \
-            >> Output/camera.log 2>&1 &
-        camera_pid=$!
+        camera_pid="$(camera_process_ids | head -n 1)"
+        if [[ -z "$camera_pid" ]]; then
+            cd "$project_dir"
+            "$reader" --camera "${CAMERA_INDEX:-0}" \
+                models/license_plate_detector.onnx \
+                models/en_PP-OCRv5_rec_mobile.onnx \
+                Output database/gate_access.db --headless \
+                >> Output/camera.log 2>&1 &
+            camera_pid=$!
+        fi
         echo "$camera_pid" > "$camera_pid_file"
         echo "Camera reader started (PID $camera_pid)."
     else
