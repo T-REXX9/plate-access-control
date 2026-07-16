@@ -23,9 +23,14 @@ cleanup() {
         kill "$web_pid" 2>/dev/null || true
         wait "$web_pid" 2>/dev/null || true
     fi
-    if [[ -n "$camera_pid" ]] && kill -0 "$camera_pid" 2>/dev/null; then
-        kill "$camera_pid" 2>/dev/null || true
-        wait "$camera_pid" 2>/dev/null || true
+    if [[ -f "$camera_pid_file" ]]; then
+        active_camera_pid="$(<"$camera_pid_file")"
+        active_camera_command="$(ps -p "$active_camera_pid" -o command= 2>/dev/null || true)"
+        if [[ "$active_camera_command" == *plate_reader* ]] &&
+           [[ "$active_camera_command" == *--camera* ]]; then
+            kill "$active_camera_pid" 2>/dev/null || true
+            wait "$active_camera_pid" 2>/dev/null || true
+        fi
     fi
     rm -f "$camera_pid_file"
 }

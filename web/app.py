@@ -6,7 +6,11 @@ import math
 import os
 import re
 import secrets
+import signal
 import sqlite3
+import subprocess
+import sys
+import time
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -32,6 +36,9 @@ DATABASE_DIR = PROJECT_DIR / "database"
 DATABASE_PATH = DATABASE_DIR / "gate_access.db"
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"
 SECRET_PATH = DATABASE_DIR / "web_secret.key"
+OUTPUT_DIR = PROJECT_DIR / "Output"
+CAMERA_PID_PATH = OUTPUT_DIR / "camera.pid"
+CAMERA_LOG_PATH = OUTPUT_DIR / "camera.log"
 
 
 def load_secret_key() -> str:
@@ -55,6 +62,12 @@ app.config.update(
 def initialize_database() -> None:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
+    existing = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vehicles'"
+    ).fetchone()
+    if existing is not None:
+        connection.close()
+        return
     connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     connection.close()
 
@@ -85,6 +98,100 @@ def admin_exists() -> bool:
 
 def normalize_plate(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+def camera_pid() -> int | None:
+    try:
+        value = int(CAMERA_PID_PATH.read_text(encoding="utf-8").strip())
+        return value if value > 1 else None
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def camera_process_running() -> bool:
+    pid = camera_pid()
+    if pid is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    command = result.stdout
+    return result.returncode == 0 and "plate_reader" in command and "--camera" in command
+
+
+def set_camera_status(camera_state: str, detector_state: str) -> None:
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection.execute(
+        """
+        UPDATE system_status
+        SET camera_state = ?, detector_state = ?,
+            last_heartbeat = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+        """,
+        (camera_state, detector_state),
+    )
+    connection.commit()
+    connection.close()
+
+
+def start_camera_process() -> tuple[bool, str]:
+    if camera_process_running():
+        return True, "Camera recognition is already running."
+    reader = PROJECT_DIR / "build" / "plate_reader"
+    pi_reader = PROJECT_DIR / "build-pi" / "plate_reader"
+    if sys.platform.startswith("linux") and pi_reader.is_file():
+        reader = pi_reader
+    if not reader.is_file() or not os.access(reader, os.X_OK):
+        return False, "Camera recognition executable is not built."
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = CAMERA_LOG_PATH.open("ab")
+    try:
+        process = subprocess.Popen(
+            [
+                str(reader), "--camera", os.environ.get("CAMERA_INDEX", "0"),
+                "models/license_plate_detector.onnx",
+                "models/en_PP-OCRv5_rec_mobile.onnx",
+                "Output", "database/gate_access.db", "--headless",
+            ],
+            cwd=PROJECT_DIR,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()
+    CAMERA_PID_PATH.write_text(str(process.pid), encoding="utf-8")
+    return True, "Camera recognition started."
+
+
+def stop_camera_process() -> tuple[bool, str]:
+    pid = camera_pid()
+    if pid is None or not camera_process_running():
+        CAMERA_PID_PATH.unlink(missing_ok=True)
+        set_camera_status("offline", "stopped")
+        return True, "Camera recognition is already stopped."
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(20):
+            if not camera_process_running():
+                break
+            time.sleep(0.05)
+        if camera_process_running():
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        return False, "Camera recognition could not be stopped."
+    CAMERA_PID_PATH.unlink(missing_ok=True)
+    set_camera_status("offline", "stopped")
+    return True, "Camera recognition stopped."
 
 
 def login_required(view):
@@ -239,7 +346,7 @@ def dashboard():
         FROM access_events e
         LEFT JOIN vehicles v ON v.id = e.vehicle_id
         ORDER BY e.detected_at DESC
-        LIMIT 10
+        LIMIT 8
         """
     ).fetchall()
     latest_event = connection.execute(
@@ -270,7 +377,30 @@ def dashboard():
         latest_event=latest_event,
         daily=daily,
         system=system,
+        camera_running=camera_process_running(),
     )
+
+
+@app.post("/camera/start")
+@login_required
+def camera_start():
+    success, message = start_camera_process()
+    if success:
+        record_audit("start_camera", "system", details=message)
+        get_db().commit()
+    flash(message, "success" if success else "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/camera/stop")
+@login_required
+def camera_stop():
+    success, message = stop_camera_process()
+    if success:
+        record_audit("stop_camera", "system", details=message)
+        get_db().commit()
+    flash(message, "success" if success else "error")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/vehicles")

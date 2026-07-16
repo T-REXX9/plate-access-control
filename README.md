@@ -116,6 +116,11 @@ Recognized registered vehicles are labeled with both the plate and owner, for
 example `ZAT255 Melson Bacuen`; denied unregistered vehicles retain the plate
 annotation without an owner name.
 
+The dashboard provides Start recognition and Stop recognition controls for the
+actual camera process. System status and seven-day activity stay at the top,
+and the desktop overview is arranged to fit common laptop screens without page
+scrolling. The full access history remains available through `View all`.
+
 Camera index `0` is used by default. To use another camera, run:
 
 ```bash

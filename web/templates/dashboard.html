@@ -1,10 +1,43 @@
 {% extends "base.html" %}
 {% block title %}Overview · Gatekeeper{% endblock %}
+{% block body_class %}dashboard-page{% endblock %}
 {% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
 {% block content %}
 <div class="page-heading">
   <div><p class="eyebrow">Live operations</p><h1>Gate overview</h1><p>Latest access capture, today’s activity, and system health.</p></div>
-  <a class="primary-button" href="{{ url_for('vehicle_new') }}">+ Register vehicle</a>
+  <div class="page-actions">
+    <form method="post" action="{{ url_for('camera_stop' if camera_running else 'camera_start') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="camera-toggle {{ 'stop' if camera_running else 'start' }}" type="submit">
+        {{ 'Stop recognition' if camera_running else 'Start recognition' }}
+      </button>
+    </form>
+    <a class="primary-button" href="{{ url_for('vehicle_new') }}">+ Register vehicle</a>
+  </div>
+</div>
+
+<div class="top-status-grid">
+  <aside class="panel system-panel">
+    <div class="panel-heading"><div><h2>System status</h2><p>Local Raspberry Pi services</p></div></div>
+    <dl class="status-list">
+      <div><dt>Camera</dt><dd><span class="indicator {{ 'online' if camera_running else 'offline' }}"></span>{{ 'Online' if camera_running else 'Offline' }}</dd></div>
+      <div><dt>Detector</dt><dd><span class="indicator {{ 'online' if camera_running and system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span>{{ system.detector_state | title if camera_running else 'Stopped' }}</dd></div>
+      <div><dt>Gate</dt><dd><span class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span>{{ system.gate_state | title }}</dd></div>
+      <div><dt>Last plate</dt><dd>{{ system.last_plate or 'None' }}</dd></div>
+      <div><dt>Heartbeat</dt><dd>{{ system.last_heartbeat or 'Not connected' }}</dd></div>
+    </dl>
+  </aside>
+
+  <section class="panel activity-panel">
+    <div class="panel-heading"><div><h2>Seven-day activity</h2><p>Daily authorized and denied events</p></div></div>
+    <div class="day-grid">
+      {% for day in daily %}
+      <div class="day-card"><strong>{{ day.event_date }}</strong><span>{{ day.total_events }} total</span><small>{{ day.authorized_count }} authorized · {{ day.denied_count }} denied</small></div>
+      {% else %}
+      <p class="muted">Daily summaries will appear after the first recognition event.</p>
+      {% endfor %}
+    </div>
+  </section>
 </div>
 
 <section class="metric-grid" aria-label="Today’s summary">
@@ -34,8 +67,8 @@
     {% endif %}
   </section>
 
-  <section class="panel wide-panel">
-    <div class="panel-heading"><div><h2>Recent access</h2><p>Latest vehicles seen at the gate</p></div><a href="{{ url_for('logs') }}">View all</a></div>
+  <section class="panel wide-panel recent-panel">
+    <div class="panel-heading"><div><h2>Recent access</h2><p>Latest eight vehicles seen at the gate</p></div><a href="{{ url_for('logs') }}">View all</a></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Time</th><th>Plate</th><th>Owner</th><th>Vehicle</th><th>Decision</th></tr></thead>
@@ -56,26 +89,5 @@
     </div>
   </section>
 
-  <aside class="panel system-panel">
-    <div class="panel-heading"><div><h2>System status</h2><p>Local Raspberry Pi services</p></div></div>
-    <dl class="status-list">
-      <div><dt>Camera</dt><dd><span class="indicator {{ 'online' if system.camera_state == 'online' else 'offline' }}"></span>{{ system.camera_state | title }}</dd></div>
-      <div><dt>Detector</dt><dd><span class="indicator {{ 'online' if system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span>{{ system.detector_state | title }}</dd></div>
-      <div><dt>Gate</dt><dd><span class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span>{{ system.gate_state | title }}</dd></div>
-      <div><dt>Last plate</dt><dd>{{ system.last_plate or 'None' }}</dd></div>
-      <div><dt>Heartbeat</dt><dd>{{ system.last_heartbeat or 'Not connected' }}</dd></div>
-    </dl>
-  </aside>
-
-  <section class="panel full-panel">
-    <div class="panel-heading"><div><h2>Seven-day activity</h2><p>Daily authorized and denied events</p></div></div>
-    <div class="day-grid">
-      {% for day in daily %}
-      <div class="day-card"><strong>{{ day.event_date }}</strong><span>{{ day.total_events }} total</span><small>{{ day.authorized_count }} authorized · {{ day.denied_count }} denied</small></div>
-      {% else %}
-      <p class="muted">Daily summaries will appear after the first recognition event.</p>
-      {% endfor %}
-    </div>
-  </section>
 </div>
 {% endblock %}
