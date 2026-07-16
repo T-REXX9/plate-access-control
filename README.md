@@ -120,6 +120,15 @@ The dashboard provides Start recognition and Stop recognition controls for the
 actual camera process. System status and seven-day activity stay at the top,
 and the desktop overview is arranged to fit common laptop screens without page
 scrolling. The full access history remains available through `View all`.
+Dashboard counters, status, the latest capture, recent access, and seven-day
+activity synchronize in the background every two seconds without reloading the
+page or resetting its current position. Synchronization pauses in hidden tabs.
+
+Administrators can create read-only security-guard accounts from the `Guards`
+page. A guard can view only the overview, latest annotated event photo, and
+access logs. Vehicle administration, camera Start/Stop controls, CSV export,
+and guard-account management are hidden and rejected server-side. Deactivating
+a guard account also invalidates its existing login session.
 
 Camera index `0` is used by default. To use another camera, run:
 

@@ -55,6 +55,10 @@ button { cursor: pointer; }
 .page-actions form { margin: 0; }
 .compact-heading h1 { font-size: clamp(30px, 3vw, 42px); }
 .eyebrow { color: var(--green) !important; font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+.sync-status { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--green); font-size: 9px; letter-spacing: .04em; text-transform: none; }
+.sync-status::before { width: 6px; height: 6px; border-radius: 50%; background: var(--green); content: ""; }
+.sync-status.error { color: var(--amber); }
+.sync-status.error::before { background: var(--amber); }
 
 .primary-button, .secondary-button {
   display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0 18px;
@@ -165,6 +169,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .auth-card > p { line-height: 1.6; }
 .stack-form { display: grid; gap: 17px; margin-top: 26px; }
 .stack-form .primary-button { margin-top: 6px; }
+.guard-form { width: min(560px, 100%); margin: 0 auto; }
+.permission-note { display: grid; gap: 5px; margin: 4px 0; padding: 14px; border-radius: 10px; background: var(--blue-soft); color: #4e6077; font-size: 12px; line-height: 1.5; }
+.permission-note strong { color: #30465f; }
 
 .flash-stack { position: fixed; top: 84px; right: 24px; z-index: 40; width: min(390px, calc(100vw - 48px)); }
 .flash { margin-bottom: 9px; padding: 13px 15px; border: 1px solid; border-radius: 10px; background: white; box-shadow: var(--shadow); font-size: 13px; }

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Administrator sign in · Gatekeeper{% endblock %}
+{% block title %}Sign in · Gatekeeper{% endblock %}
 {% block body_class %}auth-page{% endblock %}
 {% block content %}
 <section class="auth-card">
   <div class="auth-badge">GK</div>
   <p class="eyebrow">Local access control</p>
-  <h1>Administrator sign in</h1>
-  <p class="muted">Manage registered vehicles and monitor gate activity.</p>
+  <h1>Gatekeeper sign in</h1>
+  <p class="muted">Administrators and security guards use their assigned account.</p>
   <form method="post" class="stack-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>Username<input name="username" autocomplete="username" required autofocus></label>

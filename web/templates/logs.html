@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading">
   <div><p class="eyebrow">Recognition history</p><h1>Complete access log</h1><p>Every recognized plate with owner, timestamp, decision and gate action.</p></div>
-  <a class="secondary-button" href="{{ url_for('logs_export', plate=filters.get('plate',''), decision=filters.get('decision',''), date_from=filters.get('date_from',''), date_to=filters.get('date_to','')) }}">Export CSV</a>
+  {% if current_role == 'administrator' %}<a class="secondary-button" href="{{ url_for('logs_export', plate=filters.get('plate',''), decision=filters.get('decision',''), date_from=filters.get('date_from',''), date_to=filters.get('date_to','')) }}">Export CSV</a>{% endif %}
 </div>
 
 <section class="panel">

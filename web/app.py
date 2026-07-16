@@ -210,6 +210,21 @@ def login_required(view):
     return wrapped
 
 
+def role_required(*allowed_roles: str):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if "user_id" not in session:
+                return redirect(url_for("login", next=request.path))
+            if session.get("role") not in allowed_roles:
+                abort(403)
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
 def record_audit(action: str, entity_type: str | None = None, entity_id: int | None = None, details: str | None = None) -> None:
     get_db().execute(
         """
@@ -231,7 +246,27 @@ def template_context() -> dict[str, Any]:
     return {
         "csrf_token": csrf_token,
         "current_user": session.get("username"),
+        "current_role": session.get("role"),
     }
+
+
+@app.before_request
+def validate_authenticated_user():
+    user_id = session.get("user_id")
+    if user_id is None:
+        return None
+    user = get_db().execute(
+        "SELECT username, role FROM users WHERE id = ? AND is_active = 1",
+        (user_id,),
+    ).fetchone()
+    if user is None:
+        session.clear()
+        if request.endpoint not in {"login", "setup", "static", "health"}:
+            return redirect(url_for("login"))
+        return None
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    return None
 
 
 @app.before_request
@@ -331,9 +366,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-@app.route("/")
-@login_required
-def dashboard():
+def load_dashboard_state() -> dict[str, Any]:
     connection = get_db()
     summary = connection.execute(
         """
@@ -376,19 +409,58 @@ def dashboard():
         """
     ).fetchall()
     system = connection.execute("SELECT * FROM system_status WHERE id = 1").fetchone()
-    return render_template(
-        "dashboard.html",
-        summary=summary,
-        recent_events=recent_events,
-        latest_event=latest_event,
-        daily=daily,
-        system=system,
-        camera_running=camera_process_running(),
-    )
+    return {
+        "summary": summary,
+        "recent_events": recent_events,
+        "latest_event": latest_event,
+        "daily": daily,
+        "system": system,
+        "camera_running": camera_process_running(),
+    }
+
+
+@app.route("/")
+@login_required
+def dashboard():
+    return render_template("dashboard.html", **load_dashboard_state())
+
+
+@app.route("/api/dashboard")
+@login_required
+def dashboard_sync():
+    state = load_dashboard_state()
+    summary = dict(state["summary"])
+    latest = dict(state["latest_event"]) if state["latest_event"] else None
+    if latest is not None:
+        latest["image_url"] = url_for("event_image", event_id=latest["id"])
+    recent = []
+    for row in state["recent_events"]:
+        event = dict(row)
+        event["vehicle"] = " ".join(
+            value for value in (event["make"], event["model"]) if value
+        ) or event["vehicle_type"] or "—"
+        recent.append(event)
+    system = dict(state["system"])
+    camera_running = state["camera_running"]
+    payload = {
+        "summary": summary,
+        "latest_event": latest,
+        "recent_events": recent,
+        "daily": [dict(row) for row in state["daily"]],
+        "system": {
+            "camera_running": camera_running,
+            "camera_state": "online" if camera_running else "offline",
+            "detector_state": system["detector_state"] if camera_running else "stopped",
+            "gate_state": system["gate_state"],
+            "last_plate": system["last_plate"],
+            "last_heartbeat": system["last_heartbeat"],
+        },
+    }
+    return payload, 200, {"Cache-Control": "no-store"}
 
 
 @app.post("/camera/start")
-@login_required
+@role_required("administrator")
 def camera_start():
     success, message = start_camera_process()
     if success:
@@ -399,7 +471,7 @@ def camera_start():
 
 
 @app.post("/camera/stop")
-@login_required
+@role_required("administrator")
 def camera_stop():
     success, message = stop_camera_process()
     if success:
@@ -410,7 +482,7 @@ def camera_stop():
 
 
 @app.route("/vehicles")
-@login_required
+@role_required("administrator")
 def vehicles():
     query = request.args.get("q", "").strip()
     if query:
@@ -449,7 +521,7 @@ def vehicle_form_values() -> dict[str, str]:
 
 
 @app.route("/vehicles/new", methods=["GET", "POST"])
-@login_required
+@role_required("administrator")
 def vehicle_new():
     values: dict[str, Any] = {}
     if request.method == "POST":
@@ -481,7 +553,7 @@ def vehicle_new():
 
 
 @app.route("/vehicles/<int:vehicle_id>/edit", methods=["GET", "POST"])
-@login_required
+@role_required("administrator")
 def vehicle_edit(vehicle_id: int):
     connection = get_db()
     existing = connection.execute("SELECT * FROM vehicles WHERE id = ?", (vehicle_id,)).fetchone()
@@ -514,7 +586,7 @@ def vehicle_edit(vehicle_id: int):
 
 
 @app.post("/vehicles/<int:vehicle_id>/toggle")
-@login_required
+@role_required("administrator")
 def vehicle_toggle(vehicle_id: int):
     connection = get_db()
     vehicle = connection.execute(
@@ -533,6 +605,79 @@ def vehicle_toggle(vehicle_id: int):
     connection.commit()
     flash(f'{vehicle["plate_number"]} is now {"active" if new_state else "inactive"}.', "success")
     return redirect(url_for("vehicles"))
+
+
+@app.route("/users")
+@role_required("administrator")
+def users():
+    guard_users = get_db().execute(
+        """
+        SELECT id, username, is_active, created_at, last_login_at
+        FROM users
+        WHERE role = 'viewer'
+        ORDER BY is_active DESC, username
+        """
+    ).fetchall()
+    return render_template("users.html", users=guard_users)
+
+
+@app.route("/users/new", methods=["GET", "POST"])
+@role_required("administrator")
+def user_new():
+    username = ""
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        confirmation = request.form.get("confirmation", "")
+        if len(username) < 3:
+            flash("Username must contain at least three characters.", "error")
+        elif len(password) < 10:
+            flash("Password must contain at least ten characters.", "error")
+        elif password != confirmation:
+            flash("The passwords do not match.", "error")
+        else:
+            try:
+                connection = get_db()
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users (username, password_hash, role)
+                    VALUES (?, ?, 'viewer')
+                    """,
+                    (username, generate_password_hash(password)),
+                )
+                record_audit("create_guard", "user", cursor.lastrowid, username)
+                connection.commit()
+                flash(f"Read-only guard account {username} was created.", "success")
+                return redirect(url_for("users"))
+            except sqlite3.IntegrityError:
+                flash("That username is already in use.", "error")
+    return render_template("user_form.html", username=username)
+
+
+@app.post("/users/<int:user_id>/toggle")
+@role_required("administrator")
+def user_toggle(user_id: int):
+    connection = get_db()
+    guard = connection.execute(
+        "SELECT username, is_active FROM users WHERE id = ? AND role = 'viewer'",
+        (user_id,),
+    ).fetchone()
+    if guard is None:
+        abort(404)
+    new_state = 0 if guard["is_active"] else 1
+    connection.execute("UPDATE users SET is_active = ? WHERE id = ?", (new_state, user_id))
+    record_audit(
+        "activate_guard" if new_state else "deactivate_guard",
+        "user",
+        user_id,
+        guard["username"],
+    )
+    connection.commit()
+    flash(
+        f'{guard["username"]} is now {"active" if new_state else "inactive"}.',
+        "success",
+    )
+    return redirect(url_for("users"))
 
 
 def log_filters() -> tuple[list[str], list[Any]]:
@@ -594,7 +739,7 @@ def logs():
 
 
 @app.route("/logs/export.csv")
-@login_required
+@role_required("administrator")
 def logs_export():
     clauses, parameters = log_filters()
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""

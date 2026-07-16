@@ -1,36 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Overview · Gatekeeper{% endblock %}
 {% block body_class %}dashboard-page{% endblock %}
-{% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
+{% block head %}<script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>{% endblock %}
 {% block content %}
 <div class="page-heading">
-  <div><p class="eyebrow">Live operations</p><h1>Gate overview</h1><p>Latest access capture, today’s activity, and system health.</p></div>
-  <div class="page-actions">
-    <form method="post" action="{{ url_for('camera_stop' if camera_running else 'camera_start') }}">
+  <div><p class="eyebrow">Live operations <span class="sync-status" id="sync-status">Connected</span></p><h1>Gate overview</h1><p>Latest access capture, today’s activity, and system health.</p></div>
+  {% if current_role == 'administrator' %}<div class="page-actions">
+    <form id="camera-control-form" method="post" action="{{ url_for('camera_stop' if camera_running else 'camera_start') }}" data-start-url="{{ url_for('camera_start') }}" data-stop-url="{{ url_for('camera_stop') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button class="camera-toggle {{ 'stop' if camera_running else 'start' }}" type="submit">
+      <button id="camera-control-button" class="camera-toggle {{ 'stop' if camera_running else 'start' }}" type="submit">
         {{ 'Stop recognition' if camera_running else 'Start recognition' }}
       </button>
     </form>
     <a class="primary-button" href="{{ url_for('vehicle_new') }}">+ Register vehicle</a>
-  </div>
+  </div>{% endif %}
 </div>
 
 <div class="top-status-grid">
   <aside class="panel system-panel">
     <div class="panel-heading"><div><h2>System status</h2><p>Local Raspberry Pi services</p></div></div>
     <dl class="status-list">
-      <div><dt>Camera</dt><dd><span class="indicator {{ 'online' if camera_running else 'offline' }}"></span>{{ 'Online' if camera_running else 'Offline' }}</dd></div>
-      <div><dt>Detector</dt><dd><span class="indicator {{ 'online' if camera_running and system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span>{{ system.detector_state | title if camera_running else 'Stopped' }}</dd></div>
-      <div><dt>Gate</dt><dd><span class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span>{{ system.gate_state | title }}</dd></div>
-      <div><dt>Last plate</dt><dd>{{ system.last_plate or 'None' }}</dd></div>
-      <div><dt>Heartbeat</dt><dd>{{ system.last_heartbeat or 'Not connected' }}</dd></div>
+      <div><dt>Camera</dt><dd><span id="camera-indicator" class="indicator {{ 'online' if camera_running else 'offline' }}"></span><span id="system-camera">{{ 'Online' if camera_running else 'Offline' }}</span></dd></div>
+      <div><dt>Detector</dt><dd><span id="detector-indicator" class="indicator {{ 'online' if camera_running and system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span><span id="system-detector">{{ system.detector_state | title if camera_running else 'Stopped' }}</span></dd></div>
+      <div><dt>Gate</dt><dd><span id="gate-indicator" class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span><span id="system-gate">{{ system.gate_state | title }}</span></dd></div>
+      <div><dt>Last plate</dt><dd id="system-last-plate">{{ system.last_plate or 'None' }}</dd></div>
+      <div><dt>Heartbeat</dt><dd id="system-heartbeat">{{ system.last_heartbeat or 'Not connected' }}</dd></div>
     </dl>
   </aside>
 
   <section class="panel activity-panel">
     <div class="panel-heading"><div><h2>Seven-day activity</h2><p>Daily authorized and denied events</p></div></div>
-    <div class="day-grid">
+    <div class="day-grid" id="daily-activity">
       {% for day in daily %}
       <div class="day-card"><strong>{{ day.event_date }}</strong><span>{{ day.total_events }} total</span><small>{{ day.authorized_count }} authorized · {{ day.denied_count }} denied</small></div>
       {% else %}
@@ -41,30 +41,27 @@
 </div>
 
 <section class="metric-grid" aria-label="Today’s summary">
-  <article class="metric-card"><span>Active vehicles</span><strong>{{ summary.active_vehicles }}</strong><small>Allowed registrations</small></article>
-  <article class="metric-card accent"><span>Entries today</span><strong>{{ summary.events_today }}</strong><small>All recognition events</small></article>
-  <article class="metric-card success"><span>Authorized</span><strong>{{ summary.authorized_today }}</strong><small>Approved today</small></article>
-  <article class="metric-card danger"><span>Denied</span><strong>{{ summary.denied_today }}</strong><small>Rejected today</small></article>
+  <article class="metric-card"><span>Active vehicles</span><strong id="metric-active-vehicles">{{ summary.active_vehicles }}</strong><small>Allowed registrations</small></article>
+  <article class="metric-card accent"><span>Entries today</span><strong id="metric-events-today">{{ summary.events_today }}</strong><small>All recognition events</small></article>
+  <article class="metric-card success"><span>Authorized</span><strong id="metric-authorized-today">{{ summary.authorized_today }}</strong><small>Approved today</small></article>
+  <article class="metric-card danger"><span>Denied</span><strong id="metric-denied-today">{{ summary.denied_today }}</strong><small>Rejected today</small></article>
 </section>
 
 <div class="dashboard-grid">
   <section class="panel full-panel event-photo-panel">
     <div class="panel-heading">
       <div><h2>Latest gate capture</h2><p>Updated automatically when a plate is granted or denied</p></div>
-      {% if latest_event %}<span class="status {{ latest_event.decision }}">{{ latest_event.decision }}</span>{% endif %}
+      <span id="latest-decision" class="status {{ latest_event.decision if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>{{ latest_event.decision if latest_event else '' }}</span>
     </div>
-    {% if latest_event %}
-      <div class="event-photo-frame">
-        <img src="{{ url_for('event_image', event_id=latest_event.id) }}" alt="Annotated capture of plate {{ latest_event.plate_number }}">
+      <div id="latest-photo-frame" class="event-photo-frame" data-event-id="{{ latest_event.id if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>
+        <img id="latest-photo" {% if latest_event %}src="{{ url_for('event_image', event_id=latest_event.id) }}" alt="Annotated capture of plate {{ latest_event.plate_number }}"{% else %}alt="Latest annotated vehicle capture"{% endif %}>
       </div>
-      <div class="event-photo-details">
-        <span class="plate">{{ latest_event.plate_number }}</span>
-        <strong>{{ latest_event.owner_name or 'Unregistered vehicle' }}</strong>
-        <span>{{ latest_event.local_time }}</span>
+      <div id="latest-photo-details" class="event-photo-details" {% if not latest_event %}hidden{% endif %}>
+        <span id="latest-plate" class="plate">{{ latest_event.plate_number if latest_event else '' }}</span>
+        <strong id="latest-owner">{{ latest_event.owner_name or 'Unregistered vehicle' if latest_event else '' }}</strong>
+        <span id="latest-time">{{ latest_event.local_time if latest_event else '' }}</span>
       </div>
-    {% else %}
-      <div class="event-photo-placeholder"><strong>No vehicle captured yet</strong><span>The first granted or denied plate photo will appear here automatically.</span></div>
-    {% endif %}
+      <div id="latest-photo-placeholder" class="event-photo-placeholder" {% if latest_event %}hidden{% endif %}><strong>No vehicle captured yet</strong><span>The first granted or denied plate photo will appear here automatically.</span></div>
   </section>
 
   <section class="panel wide-panel recent-panel">
@@ -72,7 +69,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr><th>Time</th><th>Plate</th><th>Owner</th><th>Vehicle</th><th>Decision</th></tr></thead>
-        <tbody>
+        <tbody id="recent-events-body">
         {% for event in recent_events %}
           <tr>
             <td class="nowrap">{{ event.local_time }}</td>
