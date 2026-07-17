@@ -3,10 +3,12 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <opencv2/dnn.hpp>
@@ -491,8 +493,10 @@ int runCamera(
     int cameraIndex,
     const fs::path& outputDirectory,
     const fs::path& databasePath,
-    bool headless
+    bool headless,
+    const fs::path& commandFile
 ) {
+    std::cout << std::unitbuf;
     cv::VideoCapture camera;
 #ifdef __APPLE__
     camera.open(cameraIndex, cv::CAP_AVFOUNDATION);
@@ -512,7 +516,15 @@ int runCamera(
     camera.set(cv::CAP_PROP_BUFFERSIZE, 1);
     fs::create_directories(outputDirectory);
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
+    const fs::path latestCapturePath = outputDirectory / "latest-capture.jpg";
     fs::create_directories(cropDirectory);
+    if (!commandFile.empty()) {
+        if (!commandFile.parent_path().empty()) {
+            fs::create_directories(commandFile.parent_path());
+        }
+        std::error_code error;
+        fs::remove(commandFile, error);
+    }
     GateDatabase gateDatabase(databasePath);
     if (!gateDatabase.available()) {
         std::cerr << "Recognition will continue, but access events cannot be recorded.\n";
@@ -525,10 +537,38 @@ int runCamera(
     std::cout
         << "Camera ready in on-demand mode. YOLO and OCR are idle.\n"
         << "Commands: capture | status | help | quit\n";
+    if (!commandFile.empty()) {
+        std::cout << "Waiting for website commands in " << commandFile.string() << ".\n";
+    }
 
     int captureNumber = 0;
     std::string command;
-    while (std::cout << "plate-reader> " << std::flush, std::getline(std::cin, command)) {
+    auto lastHeartbeat = std::chrono::steady_clock::now();
+    while (true) {
+        command.clear();
+        if (commandFile.empty()) {
+            std::cout << "plate-reader> " << std::flush;
+            if (!std::getline(std::cin, command)) {
+                break;
+            }
+        } else {
+            while (command.empty()) {
+                std::ifstream input(commandFile);
+                if (input) {
+                    std::getline(input, command);
+                    input.close();
+                    std::error_code error;
+                    fs::remove(commandFile, error);
+                } else {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastHeartbeat >= std::chrono::seconds(1)) {
+                        gateDatabase.updateStatus("online", "idle");
+                        lastHeartbeat = now;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        }
         command.erase(command.begin(), std::find_if(command.begin(), command.end(), [](unsigned char c) {
             return !std::isspace(c);
         }));
@@ -638,6 +678,23 @@ int runCamera(
                       << detection.confidence << ")\n";
         }
 
+        const fs::path temporaryLatest = outputDirectory / "latest-capture.tmp.jpg";
+        if (cv::imwrite(temporaryLatest.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 92})) {
+            std::error_code error;
+            fs::remove(latestCapturePath, error);
+            error.clear();
+            fs::rename(temporaryLatest, latestCapturePath, error);
+            if (error) {
+                std::cerr << "CAPTURE " << captureNumber
+                          << ": unable to publish the annotated dashboard photo: "
+                          << error.message() << '\n';
+            } else {
+                std::cout << "CAPTURE " << captureNumber
+                          << ": dashboard preview updated "
+                          << latestCapturePath.string() << '\n';
+            }
+        }
+
         for (const CaptureResult& result : results) {
             if (result.plate == "UNREADABLE") {
                 std::cout << "UNREADABLE - plate region detected but OCR returned no value.\n";
@@ -706,6 +763,13 @@ int main(int argc, char** argv) {
     const fs::path databasePath = cameraMode && argc > 6
         ? argv[6]
         : "database/gate_access.db";
+    fs::path commandFile;
+    for (int index = 1; index + 1 < argc; ++index) {
+        if (std::string(argv[index]) == "--command-file") {
+            commandFile = argv[index + 1];
+            break;
+        }
+    }
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
     fs::create_directories(cropDirectory);
 
@@ -717,7 +781,15 @@ int main(int argc, char** argv) {
 
     if (cameraMode) {
 #ifdef PLATE_ENABLE_CAMERA
-        return runCamera(detector, recognizer, cameraIndex, outputDirectory, databasePath, headless);
+        return runCamera(
+            detector,
+            recognizer,
+            cameraIndex,
+            outputDirectory,
+            databasePath,
+            headless,
+            commandFile
+        );
 #else
         std::cerr << "Camera support was disabled when this executable was built.\n";
         return 1;

@@ -16,6 +16,7 @@ fi
 camera_pid=""
 web_pid=""
 camera_pid_file="$project_dir/Output/camera.pid"
+camera_command_file="$project_dir/Output/camera-command.txt"
 
 camera_process_ids() {
     while read -r process_id process_command; do
@@ -40,6 +41,7 @@ cleanup() {
         kill -9 "$active_camera_pid" 2>/dev/null || true
     done < <(camera_process_ids)
     rm -f "$camera_pid_file"
+    rm -f "$camera_command_file"
 }
 trap cleanup EXIT INT TERM
 
@@ -53,10 +55,12 @@ if [[ "${START_CAMERA:-1}" != "0" ]]; then
         camera_pid="$(camera_process_ids | head -n 1)"
         if [[ -z "$camera_pid" ]]; then
             cd "$project_dir"
+            rm -f "$camera_command_file"
             "$reader" --camera "${CAMERA_INDEX:-0}" \
                 models/license_plate_detector.onnx \
                 models/en_PP-OCRv5_rec_mobile.onnx \
                 Output database/gate_access.db --headless \
+                --command-file "$camera_command_file" \
                 >> Output/camera.log 2>&1 &
             camera_pid=$!
         fi

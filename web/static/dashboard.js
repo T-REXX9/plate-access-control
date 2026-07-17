@@ -25,13 +25,44 @@
     return badge;
   };
 
-  function updateCameraControl(running) {
+  function showNotification(message, category) {
+    let stack = document.querySelector(".flash-stack");
+    if (!stack) {
+      stack = document.createElement("div");
+      stack.className = "flash-stack";
+      stack.setAttribute("aria-live", "polite");
+      document.body.append(stack);
+    }
+    const notification = document.createElement("div");
+    notification.className = `flash ${category}`;
+    notification.textContent = message;
+    stack.append(notification);
+    const dismiss = () => {
+      if (notification.classList.contains("is-dismissing")) return;
+      notification.classList.add("is-dismissing");
+      window.setTimeout(() => notification.remove(), 220);
+    };
+    const timer = window.setTimeout(dismiss, 4000);
+    notification.addEventListener("mouseenter", () => {
+      window.clearTimeout(timer);
+      dismiss();
+    }, { once: true });
+  }
+
+  function updateCameraControl(running, detectorState) {
     const form = byId("camera-control-form");
     const button = byId("camera-control-button");
-    if (!form || !button) return;
-    form.action = running ? form.dataset.stopUrl : form.dataset.startUrl;
-    button.className = `camera-toggle ${running ? "stop" : "start"}`;
-    button.textContent = running ? "Stop recognition" : "Start recognition";
+    if (form && button) {
+      form.action = running ? form.dataset.stopUrl : form.dataset.startUrl;
+      button.className = `camera-toggle ${running ? "stop" : "start"}`;
+      button.textContent = running ? "Stop recognition" : "Start recognition";
+    }
+    const captureButton = byId("camera-capture-button");
+    if (captureButton) {
+      const busy = ["queued", "active"].includes(detectorState);
+      captureButton.disabled = !running || busy;
+      captureButton.textContent = busy && running ? "Capturing…" : "Capture plate";
+    }
   }
 
   function updateLatest(event) {
@@ -51,9 +82,11 @@
     }
 
     const eventId = String(event.id);
-    if (frame.dataset.eventId !== eventId) {
+    const imageVersion = String(event.image_version || event.id);
+    if (frame.dataset.eventId !== eventId || frame.dataset.imageVersion !== imageVersion) {
       frame.dataset.eventId = eventId;
-      image.src = `${event.image_url}?v=${encodeURIComponent(eventId)}`;
+      frame.dataset.imageVersion = imageVersion;
+      image.src = `${event.image_url}?v=${encodeURIComponent(imageVersion)}`;
     }
     image.alt = `Annotated capture of plate ${event.plate_number}`;
     text("latest-plate", event.plate_number);
@@ -148,12 +181,12 @@
     indicator("camera-indicator", data.system.camera_running ? "online" : "offline");
     indicator(
       "detector-indicator",
-      data.system.camera_running && ["active", "idle", "calibrating"].includes(data.system.detector_state)
+      data.system.camera_running && ["active", "idle", "queued"].includes(data.system.detector_state)
         ? "online"
         : "offline",
     );
     indicator("gate-indicator", data.system.gate_state === "open" ? "online" : "neutral");
-    updateCameraControl(data.system.camera_running);
+    updateCameraControl(data.system.camera_running, data.system.detector_state);
     updateLatest(data.latest_event);
     updateRecent(data.recent_events);
     updateDaily(data.daily);
@@ -162,6 +195,36 @@
   function schedule() {
     window.clearTimeout(timer);
     if (!document.hidden) timer = window.setTimeout(sync, POLL_INTERVAL_MS);
+  }
+
+  function setupCaptureForm() {
+    const form = byId("camera-capture-form");
+    const button = byId("camera-capture-button");
+    if (!form || !button) return;
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      button.textContent = "Capturing…";
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          headers: { Accept: "application/json" },
+        });
+        const result = await response.json();
+        showNotification(result.message, result.success ? "success" : "error");
+        if (!result.success) {
+          button.disabled = false;
+          button.textContent = "Capture plate";
+        }
+        sync();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Capture plate";
+        showNotification("The capture request could not be sent.", "error");
+        console.warn(error);
+      }
+    });
   }
 
   async function sync() {
@@ -195,5 +258,6 @@
     window.clearTimeout(timer);
     if (!document.hidden) sync();
   });
+  setupCaptureForm();
   sync();
 })();

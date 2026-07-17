@@ -51,9 +51,11 @@ returns to idle when the capture finishes. Enter `status`, `help`, or `quit`
 for the other available commands.
 
 Requested full frames remain in memory only and are discarded as soon as each
-capture finishes. Only enhanced plate crops are stored in `Output/Plate-Crops`;
-database events reference those crops. If macOS asks for camera access, allow
-it for Terminal (or the app launching the command).
+capture finishes. Enhanced plate crops are stored in `Output/Plate-Crops` and
+database events reference those crops. The dashboard keeps one overwritten
+`Output/latest-capture.jpg` annotated preview; it is never archived per event.
+If macOS asks for camera access, allow it for Terminal (or the app launching
+the command).
 
 ## Raspberry Pi 4 (4 GB)
 
@@ -117,16 +119,17 @@ Open `http://localhost:8080` on the same computer. On the first visit, create
 the administrator username and password. The site includes the live summary,
 registered-vehicle entry and editing, active/inactive authorization controls,
 the complete searchable access log, event snapshots, and CSV export. Starting
-the website also starts the real-time camera reader in headless mode. Its
-latest annotated event photo appears on the dashboard instead of opening a
-separate camera window or continuously streaming video. A new photo is saved
-whenever a stable plate reading produces a granted or denied access event.
+the website also starts the on-demand camera reader in headless idle mode. The
+administrator uses the `Capture plate` button to request one fresh frame and
+one YOLO → crop/enhancement → OCR pass. The latest annotated preview then
+appears automatically without continuously streaming video or running idle
+inference.
 Recognized registered vehicles are labeled with both the plate and owner, for
 example `ZAT255 Melson Bacuen`; denied unregistered vehicles retain the plate
 annotation without an owner name.
 
-The dashboard provides Start recognition and Stop recognition controls for the
-actual camera process. System status and seven-day activity stay at the top,
+The dashboard provides Capture plate, Start recognition, and Stop recognition
+controls for the actual camera process. System status and seven-day activity stay at the top,
 and the desktop overview is arranged to fit common laptop screens without page
 scrolling. The full access history remains available through `View all`.
 Dashboard counters, status, the latest capture, recent access, and seven-day

@@ -6,6 +6,12 @@
 <div class="page-heading">
   <div><p class="eyebrow">Live operations <span class="sync-status" id="sync-status">Connected</span></p><h1>Gate overview</h1><p>Latest access capture, today’s activity, and system health.</p></div>
   {% if current_role == 'administrator' %}<div class="page-actions">
+    <form id="camera-capture-form" method="post" action="{{ url_for('camera_capture') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button id="camera-capture-button" class="camera-toggle capture" type="submit" {{ 'disabled' if not camera_running or system.detector_state in ['queued', 'active'] else '' }}>
+        {{ 'Capturing…' if camera_running and system.detector_state in ['queued', 'active'] else 'Capture plate' }}
+      </button>
+    </form>
     <form id="camera-control-form" method="post" action="{{ url_for('camera_stop' if camera_running else 'camera_start') }}" data-start-url="{{ url_for('camera_start') }}" data-stop-url="{{ url_for('camera_stop') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button id="camera-control-button" class="camera-toggle {{ 'stop' if camera_running else 'start' }}" type="submit">
@@ -21,7 +27,7 @@
     <div class="panel-heading"><div><h2>System status</h2><p>Local Raspberry Pi services</p></div></div>
     <dl class="status-list">
       <div><dt>Camera</dt><dd><span id="camera-indicator" class="indicator {{ 'online' if camera_running else 'offline' }}"></span><span id="system-camera">{{ 'Online' if camera_running else 'Offline' }}</span></dd></div>
-      <div><dt>Detector</dt><dd><span id="detector-indicator" class="indicator {{ 'online' if camera_running and system.detector_state in ['active','idle','calibrating'] else 'offline' }}"></span><span id="system-detector">{{ system.detector_state | title if camera_running else 'Stopped' }}</span></dd></div>
+      <div><dt>Detector</dt><dd><span id="detector-indicator" class="indicator {{ 'online' if camera_running and system.detector_state in ['active','idle','queued'] else 'offline' }}"></span><span id="system-detector">{{ system.detector_state | title if camera_running else 'Stopped' }}</span></dd></div>
       <div><dt>Gate</dt><dd><span id="gate-indicator" class="indicator {{ 'online' if system.gate_state == 'open' else 'neutral' }}"></span><span id="system-gate">{{ system.gate_state | title }}</span></dd></div>
       <div><dt>Last plate</dt><dd id="system-last-plate">{{ system.last_plate or 'None' }}</dd></div>
       <div><dt>Heartbeat</dt><dd id="system-heartbeat">{{ system.last_heartbeat or 'Not connected' }}</dd></div>
@@ -53,8 +59,8 @@
       <div><h2>Latest gate capture</h2><p>Updated automatically when a plate is granted or denied</p></div>
       <span id="latest-decision" class="status {{ latest_event.decision if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>{{ latest_event.decision if latest_event else '' }}</span>
     </div>
-      <div id="latest-photo-frame" class="event-photo-frame" data-event-id="{{ latest_event.id if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>
-        <img id="latest-photo" {% if latest_event %}src="{{ url_for('event_image', event_id=latest_event.id) }}" alt="Annotated capture of plate {{ latest_event.plate_number }}"{% else %}alt="Latest annotated vehicle capture"{% endif %}>
+      <div id="latest-photo-frame" class="event-photo-frame" data-event-id="{{ latest_event.id if latest_event else '' }}" data-image-version="{{ latest_capture_version or latest_event.id if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>
+        <img id="latest-photo" {% if latest_event %}src="{{ url_for('latest_capture_image') if latest_capture_version else url_for('event_image', event_id=latest_event.id) }}?v={{ latest_capture_version or latest_event.id }}" alt="Annotated capture of plate {{ latest_event.plate_number }}"{% else %}alt="Latest annotated vehicle capture"{% endif %}>
       </div>
       <div id="latest-photo-details" class="event-photo-details" {% if not latest_event %}hidden{% endif %}>
         <span id="latest-plate" class="plate">{{ latest_event.plate_number if latest_event else '' }}</span>

@@ -70,8 +70,11 @@ button { cursor: pointer; }
 .camera-toggle { min-height: 42px; padding: 0 16px; border: 1px solid; border-radius: 10px; background: white; font-weight: 750; font-size: 13px; }
 .camera-toggle.start { border-color: #79ad88; color: var(--green-dark); }
 .camera-toggle.start:hover { background: var(--green-soft); }
+.camera-toggle.capture { border-color: #6f8cab; color: #365778; }
+.camera-toggle.capture:hover:not(:disabled) { background: var(--blue-soft); }
 .camera-toggle.stop { border-color: #d9a39f; color: var(--red); }
 .camera-toggle.stop:hover { background: var(--red-soft); }
+.camera-toggle:disabled { cursor: not-allowed; opacity: .45; }
 .secondary-button { background: white; border-color: var(--line); color: var(--ink); }
 .secondary-button:hover { border-color: #aab5ac; color: var(--ink); }
 .full { width: 100%; }

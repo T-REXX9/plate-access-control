@@ -39,6 +39,8 @@ SECRET_PATH = DATABASE_DIR / "web_secret.key"
 OUTPUT_DIR = PROJECT_DIR / "Output"
 CAMERA_PID_PATH = OUTPUT_DIR / "camera.pid"
 CAMERA_LOG_PATH = OUTPUT_DIR / "camera.log"
+CAMERA_COMMAND_PATH = OUTPUT_DIR / "camera-command.txt"
+LATEST_CAPTURE_PATH = OUTPUT_DIR / "latest-capture.jpg"
 
 
 def load_secret_key() -> str:
@@ -156,6 +158,7 @@ def start_camera_process() -> tuple[bool, str]:
     if not reader.is_file() or not os.access(reader, os.X_OK):
         return False, "Camera recognition executable is not built."
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CAMERA_COMMAND_PATH.unlink(missing_ok=True)
     log_file = CAMERA_LOG_PATH.open("ab")
     try:
         process = subprocess.Popen(
@@ -164,10 +167,12 @@ def start_camera_process() -> tuple[bool, str]:
                 "models/license_plate_detector.onnx",
                 "models/en_PP-OCRv5_rec_mobile.onnx",
                 "Output", "database/gate_access.db", "--headless",
+                "--command-file", str(CAMERA_COMMAND_PATH),
             ],
             cwd=PROJECT_DIR,
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
     finally:
@@ -196,8 +201,22 @@ def stop_camera_process() -> tuple[bool, str]:
     except PermissionError:
         return False, "Camera recognition could not be stopped."
     CAMERA_PID_PATH.unlink(missing_ok=True)
+    CAMERA_COMMAND_PATH.unlink(missing_ok=True)
     set_camera_status("offline", "stopped")
     return True, "Camera recognition stopped."
+
+
+def queue_camera_capture() -> tuple[bool, str]:
+    if not camera_process_running():
+        return False, "Start recognition before requesting a capture."
+    if CAMERA_COMMAND_PATH.exists():
+        return False, "A capture request is already waiting to be processed."
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = CAMERA_COMMAND_PATH.with_suffix(".tmp")
+    temporary.write_text("capture\n", encoding="utf-8")
+    temporary.replace(CAMERA_COMMAND_PATH)
+    set_camera_status("online", "queued")
+    return True, "Plate capture requested. Results will appear automatically."
 
 
 def login_required(view):
@@ -416,6 +435,11 @@ def load_dashboard_state() -> dict[str, Any]:
         "daily": daily,
         "system": system,
         "camera_running": camera_process_running(),
+        "latest_capture_version": (
+            LATEST_CAPTURE_PATH.stat().st_mtime_ns
+            if LATEST_CAPTURE_PATH.is_file()
+            else None
+        ),
     }
 
 
@@ -432,7 +456,12 @@ def dashboard_sync():
     summary = dict(state["summary"])
     latest = dict(state["latest_event"]) if state["latest_event"] else None
     if latest is not None:
-        latest["image_url"] = url_for("event_image", event_id=latest["id"])
+        if state["latest_capture_version"] is not None:
+            latest["image_url"] = url_for("latest_capture_image")
+            latest["image_version"] = state["latest_capture_version"]
+        else:
+            latest["image_url"] = url_for("event_image", event_id=latest["id"])
+            latest["image_version"] = latest["id"]
     recent = []
     for row in state["recent_events"]:
         event = dict(row)
@@ -477,6 +506,19 @@ def camera_stop():
     if success:
         record_audit("stop_camera", "system", details=message)
         get_db().commit()
+    flash(message, "success" if success else "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/camera/capture")
+@role_required("administrator")
+def camera_capture():
+    success, message = queue_camera_capture()
+    if success:
+        record_audit("capture_plate", "system", details=message)
+        get_db().commit()
+    if request.accept_mimetypes.best == "application/json":
+        return {"success": success, "message": message}, 202 if success else 409
     flash(message, "success" if success else "error")
     return redirect(url_for("dashboard"))
 
@@ -792,6 +834,16 @@ def event_image(event_id: int):
     if not image_path.is_file():
         abort(404)
     return send_file(image_path)
+
+
+@app.route("/latest-capture.jpg")
+@login_required
+def latest_capture_image():
+    if not LATEST_CAPTURE_PATH.is_file():
+        abort(404)
+    response = send_file(LATEST_CAPTURE_PATH, max_age=0)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/health")
