@@ -198,6 +198,60 @@ double estimatePlateSkew(const cv::Mat& crop) {
     return angles.back().first;
 }
 
+cv::Mat allowedPlateInkMask(const cv::Mat& image) {
+    cv::Mat hsv;
+    cv::cvtColor(image, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat dark;
+    cv::Mat green;
+    cv::Mat redLow;
+    cv::Mat redHigh;
+    cv::Mat yellow;
+    cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(179, 255, 145), dark);
+    cv::inRange(hsv, cv::Scalar(30, 38, 35), cv::Scalar(105, 255, 255), green);
+    cv::inRange(hsv, cv::Scalar(0, 65, 45), cv::Scalar(13, 255, 255), redLow);
+    cv::inRange(hsv, cv::Scalar(165, 65, 45), cv::Scalar(179, 255, 255), redHigh);
+    cv::inRange(hsv, cv::Scalar(14, 55, 55), cv::Scalar(38, 255, 255), yellow);
+    cv::Mat allowed = dark | green | redLow | redHigh | yellow;
+    cv::morphologyEx(
+        allowed,
+        allowed,
+        cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3))
+    );
+    return allowed;
+}
+
+cv::Mat isolateRegistrationCharacters(const cv::Mat& aligned, bool correctedSkew) {
+    const cv::Mat supportedInk = allowedPlateInkMask(aligned);
+    cv::Mat hsv;
+    cv::Mat strictGreenMask;
+    cv::cvtColor(aligned, hsv, cv::COLOR_BGR2HSV);
+    cv::inRange(hsv, cv::Scalar(40, 70, 40), cv::Scalar(90, 255, 255), strictGreenMask);
+    const double topRatio = correctedSkew ? 0.10 : 0.05;
+    const double strictGreenRatio = cv::countNonZero(strictGreenMask) /
+        static_cast<double>(aligned.total());
+    const double supportedInkRatio = cv::countNonZero(supportedInk) /
+        static_cast<double>(aligned.total());
+    const bool strongGreenRegistration = strictGreenRatio >= 0.10 &&
+        supportedInkRatio >= 0.12;
+    const double bottomRatio = strongGreenRegistration
+        ? 0.80
+        : (correctedSkew ? 0.80 : 0.85);
+    const int top = static_cast<int>(aligned.rows * topRatio);
+    const int bottom = std::max(top + 1, static_cast<int>(aligned.rows * bottomRatio));
+    const cv::Rect bandBox(
+        0,
+        top,
+        aligned.cols,
+        std::min(bottom, aligned.rows) - top
+    );
+
+    // Color segmentation decides when the lower edge can be tightened to
+    // discard a small same-color slogan. Preserve the natural antialiased
+    // character edges because hard pixel masking reduces OCR accuracy.
+    return aligned(bandBox).clone();
+}
+
 std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
     constexpr int inputHeight = 48;
     constexpr int inputWidth = 320;
@@ -228,16 +282,10 @@ std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
         correctedSkew = true;
     }
 
-    // Remove borders, state names, slogans, and stickers while retaining the
-    // large registration row. This is geometry-only and does not assume a
-    // country-specific plate-number format.
-    const double topRatio = correctedSkew ? 0.10 : 0.05;
-    const double bottomRatio = correctedSkew ? 0.80 : 0.85;
-    const int top = static_cast<int>(aligned.rows * topRatio);
-    const int bottom = std::max(top + 1, static_cast<int>(aligned.rows * bottomRatio));
-    const cv::Mat registrationBand = aligned(
-        cv::Rect(0, top, aligned.cols, std::min(bottom, aligned.rows) - top)
-    );
+    // Use accepted character colors to locate the large registration row,
+    // then reject smaller slogans, logos, borders, and stickers by component
+    // size. Geometry-only cropping remains as a fallback for poor lighting.
+    const cv::Mat registrationBand = isolateRegistrationCharacters(aligned, correctedSkew);
 
     const double ratio = static_cast<double>(registrationBand.cols) / registrationBand.rows;
     const int resizedWidth = std::min(
