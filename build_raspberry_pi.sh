@@ -19,7 +19,6 @@ cmake \
     -S "$project_dir" \
     -B "$project_dir/build-pi" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DPLATE_USE_BUNDLED_OPENCV=OFF \
     -DPLATE_RASPBERRY_PI=ON
 
 # Two compiler jobs avoid memory pressure on a 4 GB Raspberry Pi while still

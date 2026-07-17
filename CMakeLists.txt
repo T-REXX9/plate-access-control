@@ -4,15 +4,8 @@ project(plate_reader_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(PLATE_USE_BUNDLED_OPENCV "Use the bundled batch-only macOS OpenCV runtime" OFF)
 option(PLATE_ENABLE_CAMERA "Build real-time camera support" ON)
 option(PLATE_RASPBERRY_PI "Tune the build for Raspberry Pi 4" OFF)
-
-# The bundled runtime contains macOS libraries. Linux/ARM builds must use the
-# OpenCV package installed by Raspberry Pi OS instead.
-if(APPLE AND PLATE_USE_BUNDLED_OPENCV)
-    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vendor/opencv")
-endif()
 
 set(PLATE_OPENCV_COMPONENTS core imgproc imgcodecs dnn)
 if(PLATE_ENABLE_CAMERA)

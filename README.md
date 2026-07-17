@@ -13,13 +13,13 @@ This is the C++ conversion of the Python raw-image pipeline. It uses:
 ```bash
 brew install cmake opencv
 cd converted
-cmake -S . -B build -DPLATE_USE_BUNDLED_OPENCV=OFF -DPLATE_ENABLE_CAMERA=ON
+cmake -S . -B build -DPLATE_ENABLE_CAMERA=ON
 cmake --build build -j
 ```
 
-The full OpenCV package supplies camera capture and the live preview window.
-For a batch-only build, the minimal bundled OpenCV runtime remains available
-with `-DPLATE_USE_BUNDLED_OPENCV=ON -DPLATE_ENABLE_CAMERA=OFF`.
+The Homebrew OpenCV package supplies detection, OCR preprocessing, camera
+capture, and the optional local preview window. Platform-specific OpenCV
+binaries are intentionally not stored in this repository.
 
 ## Run
 
@@ -82,11 +82,11 @@ Enter `capture` whenever the gate controller requests a recognition attempt.
 No YOLO or OCR inference occurs between capture commands, keeping idle CPU and
 memory use low on the Raspberry Pi 4.
 
-The Pi build uses the ARM OpenCV package supplied by Raspberry Pi OS rather
-than the bundled macOS libraries. It is compiled for the Pi 4 Cortex-A72 CPU
-and limits compilation to two parallel jobs so the build remains comfortable
-on a 4 GB device. Runtime OCR remains fully local and does not require Python,
-Tesseract, EasyOCR, or an internet connection.
+The Pi build uses the ARM OpenCV package supplied by Raspberry Pi OS. It is
+compiled for the Pi 4 Cortex-A72 CPU and limits compilation to two parallel
+jobs so the build remains comfortable on a 4 GB device. Runtime OCR remains
+fully local and does not require Python, Tesseract, EasyOCR, or an internet
+connection.
 
 ## Local database
 
