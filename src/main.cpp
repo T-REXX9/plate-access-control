@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
-#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -36,20 +35,6 @@ struct Detection {
     cv::Rect box;
     float confidence;
 };
-
-#ifdef PLATE_ENABLE_CAMERA
-struct LiveTrack {
-    cv::Rect box;
-    std::string label;
-    std::string ownerName;
-    std::vector<std::string> readings;
-    std::string loggedLabel;
-    bool authorizationKnown = false;
-    bool authorized = false;
-    int lastSeen = 0;
-    int lastOcr = -100;
-};
-#endif
 
 LetterboxResult letterbox(const cv::Mat& source) {
     const float scale = std::min(
@@ -336,76 +321,6 @@ bool supportedImage(const fs::path& path) {
 }
 
 #ifdef PLATE_ENABLE_CAMERA
-double intersectionOverUnion(const cv::Rect& first, const cv::Rect& second) {
-    const cv::Rect overlap = first & second;
-    const double intersection = static_cast<double>(overlap.area());
-    const double combined = first.area() + second.area() - intersection;
-    return combined > 0.0 ? intersection / combined : 0.0;
-}
-
-std::string stableReading(const std::vector<std::string>& readings) {
-    std::map<std::string, int> counts;
-    std::string best;
-    int bestCount = 0;
-    for (const std::string& reading : readings) {
-        const int count = ++counts[reading];
-        if (count >= bestCount) {
-            best = reading;
-            bestCount = count;
-        }
-    }
-    return best;
-}
-
-bool updateMotionGate(
-    const cv::Mat& frame,
-    const cv::Rect& gateRegion,
-    cv::Mat& background,
-    int& calibrationFrames
-) {
-    cv::Mat gateGray;
-    cv::cvtColor(frame(gateRegion), gateGray, cv::COLOR_BGR2GRAY);
-    const int analysisWidth = 320;
-    const int analysisHeight = std::max(
-        1,
-        static_cast<int>(std::round(gateGray.rows * analysisWidth / static_cast<double>(gateGray.cols)))
-    );
-    cv::resize(gateGray, gateGray, cv::Size(analysisWidth, analysisHeight), 0, 0, cv::INTER_AREA);
-    cv::GaussianBlur(gateGray, gateGray, cv::Size(9, 9), 0);
-
-    constexpr int calibrationTarget = 30;
-    if (background.empty()) {
-        gateGray.convertTo(background, CV_32F);
-        calibrationFrames = 1;
-        return false;
-    }
-    if (calibrationFrames < calibrationTarget) {
-        cv::accumulateWeighted(gateGray, background, 0.10);
-        ++calibrationFrames;
-        return false;
-    }
-
-    cv::Mat backgroundByte;
-    background.convertTo(backgroundByte, CV_8U);
-    cv::Mat difference;
-    cv::absdiff(gateGray, backgroundByte, difference);
-    cv::threshold(difference, difference, 25, 255, cv::THRESH_BINARY);
-    cv::morphologyEx(
-        difference,
-        difference,
-        cv::MORPH_OPEN,
-        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3))
-    );
-
-    const double changedRatio = cv::countNonZero(difference) /
-        static_cast<double>(difference.rows * difference.cols);
-    const bool motion = changedRatio >= 0.03;
-    // Adapt quickly while idle and very slowly during motion. The slow update
-    // keeps a stopped vehicle distinct from the empty-gate background.
-    cv::accumulateWeighted(gateGray, background, motion ? 0.002 : 0.05);
-    return motion;
-}
-
 struct AuthorizationResult {
     bool authorized = false;
     int vehicleId = -1;
@@ -555,10 +470,6 @@ private:
     sqlite3* database_ = nullptr;
 };
 
-int matchingReadingCount(const std::vector<std::string>& readings, const std::string& value) {
-    return static_cast<int>(std::count(readings.begin(), readings.end(), value));
-}
-
 std::string eventSnapshotName(const std::string& plate, int frameNumber) {
     const auto now = std::chrono::system_clock::now();
     const std::time_t timestamp = std::chrono::system_clock::to_time_t(now);
@@ -600,214 +511,167 @@ int runCamera(
     camera.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
     camera.set(cv::CAP_PROP_BUFFERSIZE, 1);
     fs::create_directories(outputDirectory);
-    const fs::path eventDirectory = outputDirectory / "Events";
-    fs::create_directories(eventDirectory);
+    const fs::path cropDirectory = outputDirectory / "Plate-Crops";
+    fs::create_directories(cropDirectory);
     GateDatabase gateDatabase(databasePath);
     if (!gateDatabase.available()) {
         std::cerr << "Recognition will continue, but access events cannot be recorded.\n";
     }
 
-    constexpr int ocrInterval = 8;
-    constexpr int trackLifetime = 15;
-    std::vector<LiveTrack> tracks;
-    cv::Mat motionBackground;
-    int motionCalibrationFrames = 0;
-    auto activeUntil = std::chrono::steady_clock::time_point::min();
-    auto lastStatusUpdate = std::chrono::steady_clock::now() - std::chrono::seconds(2);
-    int frameNumber = 0;
-    double smoothedFps = 0.0;
-    auto previousTime = std::chrono::steady_clock::now();
-
     if (!headless) {
-        cv::namedWindow("Real-time License Plate Recognition", cv::WINDOW_NORMAL);
+        cv::namedWindow("On-demand License Plate Recognition", cv::WINDOW_NORMAL);
     }
-    std::cout << "Camera started"
-              << (headless ? " in website-stream mode.\n"
-                           : ". Press Q or Esc to quit; press S to save a snapshot.\n");
-    while (true) {
-        cv::Mat frame;
-        if (!camera.read(frame) || frame.empty()) {
-            std::cerr << "Camera frame could not be read.\n";
+    gateDatabase.updateStatus("online", "idle");
+    std::cout
+        << "Camera ready in on-demand mode. YOLO and OCR are idle.\n"
+        << "Commands: capture | status | help | quit\n";
+
+    int captureNumber = 0;
+    std::string command;
+    while (std::cout << "plate-reader> " << std::flush, std::getline(std::cin, command)) {
+        command.erase(command.begin(), std::find_if(command.begin(), command.end(), [](unsigned char c) {
+            return !std::isspace(c);
+        }));
+        command.erase(std::find_if(command.rbegin(), command.rend(), [](unsigned char c) {
+            return !std::isspace(c);
+        }).base(), command.end());
+        std::transform(command.begin(), command.end(), command.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+
+        if (command == "quit" || command == "exit" || command == "q") {
             break;
         }
-        ++frameNumber;
-
-        const cv::Rect gateRegion(
-            static_cast<int>(frame.cols * 0.10),
-            static_cast<int>(frame.rows * 0.20),
-            static_cast<int>(frame.cols * 0.80),
-            static_cast<int>(frame.rows * 0.75)
-        );
-        const bool motion = updateMotionGate(
-            frame,
-            gateRegion,
-            motionBackground,
-            motionCalibrationFrames
-        );
-        const auto gateTime = std::chrono::steady_clock::now();
-        if (motion) {
-            activeUntil = gateTime + std::chrono::seconds(4);
+        if (command == "help") {
+            std::cout
+                << "capture  Grab one fresh frame and run YOLO, crop enhancement, and OCR.\n"
+                << "status   Show whether the camera and models are idle.\n"
+                << "quit     Release the camera and stop the reader.\n";
+            continue;
         }
-        const bool calibrated = motionCalibrationFrames >= 30;
-        const bool modelsActive = calibrated && gateTime < activeUntil;
+        if (command == "status") {
+            std::cout << "IDLE - camera open; waiting for the capture command.\n";
+            continue;
+        }
+        if (command.empty()) {
+            continue;
+        }
+        if (command != "capture") {
+            std::cout << "Unknown command '" << command << "'. Type help for available commands.\n";
+            continue;
+        }
 
-        const std::vector<Detection> detections = modelsActive
-            ? detectPlates(detector, frame)
-            : std::vector<Detection>{};
-        for (const Detection& detection : detections) {
-            int trackIndex = -1;
-            double bestOverlap = 0.25;
-            for (std::size_t index = 0; index < tracks.size(); ++index) {
-                if (tracks[index].lastSeen == frameNumber) {
-                    continue;
-                }
-                const double overlap = intersectionOverUnion(detection.box, tracks[index].box);
-                if (overlap > bestOverlap) {
-                    bestOverlap = overlap;
-                    trackIndex = static_cast<int>(index);
-                }
-            }
-            if (trackIndex < 0) {
-                LiveTrack newTrack;
-                newTrack.box = detection.box;
-                newTrack.lastSeen = frameNumber;
-                tracks.push_back(newTrack);
-                trackIndex = static_cast<int>(tracks.size() - 1);
-            }
+        ++captureNumber;
+        const auto startedAt = std::chrono::steady_clock::now();
+        gateDatabase.updateStatus("online", "active");
+        std::cout << "CAPTURE " << captureNumber << ": acquiring a fresh camera frame...\n";
 
-            LiveTrack& track = tracks[trackIndex];
-            track.box = detection.box;
-            track.lastSeen = frameNumber;
-            if (frameNumber - track.lastOcr >= ocrInterval || track.label.empty()) {
-                const cv::Mat crop = frame(detection.box).clone();
-                const std::string reading = readPlate(recognizer, zoomPlate(crop));
-                track.lastOcr = frameNumber;
-                if (reading != "UNREADABLE") {
-                    track.readings.push_back(reading);
-                    if (track.readings.size() > 7) {
-                        track.readings.erase(track.readings.begin());
-                    }
-                    track.label = stableReading(track.readings);
-                }
+        // A camera that remains open while idle may have queued old frames.
+        // Discard several buffers so inference always receives a current photo.
+        cv::Mat frame;
+        bool frameReady = false;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            if (camera.read(frame) && !frame.empty()) {
+                frameReady = true;
             }
+        }
+        if (!frameReady) {
+            std::cerr << "CAPTURE " << captureNumber << ": camera frame could not be read.\n";
+            gateDatabase.updateStatus("online", "idle");
+            continue;
+        }
+        const std::string captureStem = fs::path(
+            eventSnapshotName("CAPTURE", captureNumber)
+        ).stem().string();
+        std::cout << "CAPTURE " << captureNumber
+                  << ": frame held in memory only; running YOLO...\n";
 
-            bool recordAccess = false;
+        const std::vector<Detection> detections = detectPlates(detector, frame);
+        if (detections.empty()) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startedAt
+            ).count();
+            std::cout << "CAPTURE " << captureNumber << ": NO PLATE DETECTED.\n";
+            gateDatabase.updateStatus("online", "idle");
+            std::cout << "CAPTURE " << captureNumber << ": complete in "
+                      << elapsed << " ms; returning to IDLE.\n";
+            continue;
+        }
+
+        struct CaptureResult {
+            Detection detection;
+            std::string plate;
             AuthorizationResult authorization;
-            if (!track.label.empty() &&
-                matchingReadingCount(track.readings, track.label) >= 2 &&
-                track.loggedLabel != track.label) {
-                authorization = gateDatabase.authorize(track.label);
-                track.authorizationKnown = true;
-                track.authorized = authorization.authorized;
-                track.ownerName = authorization.ownerName;
-                recordAccess = true;
-            }
+            fs::path cropPath;
+        };
+        std::vector<CaptureResult> results;
+        std::cout << "CAPTURE " << captureNumber << ": YOLO found "
+                  << detections.size() << " plate region(s).\n";
 
-            const cv::Scalar labelColor = !track.authorizationKnown
-                ? cv::Scalar(0, 200, 255)
-                : (track.authorized ? cv::Scalar(0, 210, 0) : cv::Scalar(0, 0, 230));
-            std::string displayLabel = track.label.empty() ? "READING" : track.label;
-            if (!track.ownerName.empty()) {
-                displayLabel += " " + track.ownerName;
-            }
-            drawLabel(
-                frame,
-                detection.box,
-                displayLabel,
-                labelColor
-            );
+        for (std::size_t index = 0; index < detections.size(); ++index) {
+            const Detection& detection = detections[index];
+            const cv::Mat crop = frame(detection.box).clone();
+            const cv::Mat enhanced = zoomPlate(crop);
+            const fs::path cropPath = cropDirectory /
+                (captureStem + "-plate-" + std::to_string(index + 1) + ".jpg");
+            cv::imwrite(cropPath.string(), enhanced, {cv::IMWRITE_JPEG_QUALITY, 95});
+            std::cout << "CAPTURE " << captureNumber << ": OCR plate "
+                      << index + 1 << " using " << cropPath.string() << "...\n";
 
-            if (recordAccess) {
-                const fs::path snapshotPath = eventDirectory /
-                    eventSnapshotName(track.label, frameNumber);
-                cv::imwrite(snapshotPath.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 92});
-                const bool inserted = gateDatabase.recordEvent(
-                    track.label,
-                    authorization,
-                    detection.confidence,
-                    snapshotPath.string()
-                );
-                track.loggedLabel = track.label;
-                gateDatabase.updateStatus(
-                    "online",
-                    "active",
-                    track.label
-                );
-                if (inserted) {
-                    std::cout << (authorization.authorized ? "AUTHORIZED " : "DENIED ")
-                              << track.label << '\n';
-                } else {
-                    std::error_code error;
-                    fs::remove(snapshotPath, error);
+            const std::string plate = readPlate(recognizer, enhanced);
+            AuthorizationResult authorization;
+            cv::Scalar color(0, 200, 255);
+            std::string label = plate;
+            if (plate != "UNREADABLE") {
+                authorization = gateDatabase.authorize(plate);
+                color = authorization.authorized
+                    ? cv::Scalar(0, 210, 0)
+                    : cv::Scalar(0, 0, 230);
+                if (!authorization.ownerName.empty()) {
+                    label += " " + authorization.ownerName;
                 }
             }
+            drawLabel(frame, detection.box, label, color);
+            results.push_back({detection, plate, authorization, cropPath});
+            std::cout << "CAPTURE " << captureNumber << ": OCR RESULT "
+                      << plate << " (YOLO " << std::fixed << std::setprecision(2)
+                      << detection.confidence << ")\n";
         }
 
-        tracks.erase(
-            std::remove_if(tracks.begin(), tracks.end(), [frameNumber](const LiveTrack& track) {
-                return frameNumber - track.lastSeen > trackLifetime;
-            }),
-            tracks.end()
-        );
-
-        const auto currentTime = std::chrono::steady_clock::now();
-        if (currentTime - lastStatusUpdate >= std::chrono::seconds(1)) {
-            gateDatabase.updateStatus(
-                "online",
-                modelsActive ? "active" : (calibrated ? "idle" : "calibrating")
+        for (const CaptureResult& result : results) {
+            if (result.plate == "UNREADABLE") {
+                std::cout << "UNREADABLE - plate region detected but OCR returned no value.\n";
+                continue;
+            }
+            gateDatabase.updateStatus("online", "active", result.plate);
+            const bool inserted = gateDatabase.recordEvent(
+                result.plate,
+                result.authorization,
+                result.detection.confidence,
+                result.cropPath.string()
             );
-            lastStatusUpdate = currentTime;
+            if (inserted) {
+                std::cout << (result.authorization.authorized ? "AUTHORIZED " : "DENIED ")
+                          << result.plate;
+                if (!result.authorization.ownerName.empty()) {
+                    std::cout << ' ' << result.authorization.ownerName;
+                }
+                std::cout << '\n';
+            } else {
+                std::cout << "DUPLICATE SUPPRESSED " << result.plate << '\n';
+            }
         }
-        const double seconds = std::chrono::duration<double>(currentTime - previousTime).count();
-        previousTime = currentTime;
-        if (seconds > 0.0) {
-            const double instantaneousFps = 1.0 / seconds;
-            smoothedFps = smoothedFps == 0.0
-                ? instantaneousFps
-                : smoothedFps * 0.90 + instantaneousFps * 0.10;
-        }
-        std::ostringstream status;
-        status << std::fixed << std::setprecision(1) << smoothedFps << " FPS | ";
-        if (!calibrated) {
-            status << "CALIBRATING - keep gate clear";
-        } else if (modelsActive) {
-            status << "ACTIVE - scanning for plates";
-        } else {
-            status << "IDLE - waiting for gate motion";
-        }
-        if (!headless) {
-            status << " | Q: quit | S: snapshot";
-        }
-        cv::rectangle(
-            frame,
-            gateRegion,
-            modelsActive ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 200, 255),
-            2
-        );
-        cv::putText(
-            frame,
-            status.str(),
-            cv::Point(18, 32),
-            cv::FONT_HERSHEY_SIMPLEX,
-            0.75,
-            cv::Scalar(0, 255, 0),
-            2,
-            cv::LINE_AA
-        );
 
         if (!headless) {
-            cv::imshow("Real-time License Plate Recognition", frame);
-            const int key = cv::waitKey(1) & 0xFF;
-            if (key == 'q' || key == 'Q' || key == 27) {
-                break;
-            }
-            if (key == 's' || key == 'S') {
-                const fs::path target = outputDirectory /
-                    ("camera-" + std::to_string(frameNumber) + ".jpg");
-                cv::imwrite(target.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 95});
-                std::cout << "Saved " << target.string() << '\n';
-            }
+            cv::imshow("On-demand License Plate Recognition", frame);
+            cv::waitKey(1);
         }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startedAt
+        ).count();
+        gateDatabase.updateStatus("online", "idle");
+        std::cout << "CAPTURE " << captureNumber << ": complete in "
+                  << elapsed << " ms; full frame discarded, returning to IDLE.\n";
     }
 
     camera.release();

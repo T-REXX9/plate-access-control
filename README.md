@@ -35,7 +35,7 @@ different compatible OCR model as the optional fifth argument.
 Annotated images are saved in `converted/Output`. Zoomed plate-only crops are
 saved in `converted/Output/Plate-Crops`.
 
-## Real-time camera
+## On-demand camera recognition
 
 From the `converted` folder, run:
 
@@ -43,15 +43,17 @@ From the `converted` folder, run:
 ./build/plate_reader --camera 0
 ```
 
-The camera remains open, but YOLO and PP-OCRv5 sleep while the marked gate zone
-is empty. A lightweight motion gate wakes the models when something enters the
-zone and returns to idle afterward. Keep the gate clear during the short
-startup calibration. The live scan then uses the same plate crop and skew
-correction pipeline as image mode.
+The camera remains open while YOLO and PP-OCRv5 stay completely idle. At the
+`plate-reader>` prompt, enter `capture` to acquire one fresh photo and run the
+complete YOLO detection, plate crop, enhancement, skew correction, OCR, and
+database authorization pipeline. The reader prints every processing stage and
+returns to idle when the capture finishes. Enter `status`, `help`, or `quit`
+for the other available commands.
 
-Press `Q` or Escape to quit and `S` to save an annotated frame in `Output`. If
-macOS asks for camera access, allow it for Terminal (or the app launching the
-command).
+Requested full frames remain in memory only and are discarded as soon as each
+capture finishes. Only enhanced plate crops are stored in `Output/Plate-Crops`;
+database events reference those crops. If macOS asks for camera access, allow
+it for Terminal (or the app launching the command).
 
 ## Raspberry Pi 4 (4 GB)
 
@@ -65,11 +67,18 @@ cd converted
 ./build-pi/plate_reader raw-images Output models/license_plate_detector.onnx
 ```
 
-For a USB or V4L2 camera on the Pi, start real-time mode with:
+For a USB or V4L2 camera on the Pi, start on-demand headless mode with:
 
 ```bash
-./build-pi/plate_reader --camera 0
+./build-pi/plate_reader --camera 0 \
+  models/license_plate_detector.onnx \
+  models/en_PP-OCRv5_rec_mobile.onnx \
+  Output database/gate_access.db --headless
 ```
+
+Enter `capture` whenever the gate controller requests a recognition attempt.
+No YOLO or OCR inference occurs between capture commands, keeping idle CPU and
+memory use low on the Raspberry Pi 4.
 
 The Pi build uses the ARM OpenCV package supplied by Raspberry Pi OS rather
 than the bundled macOS libraries. It is compiled for the Pi 4 Cortex-A72 CPU
