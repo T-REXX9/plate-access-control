@@ -56,18 +56,18 @@
 <div class="dashboard-grid">
   <section class="panel full-panel event-photo-panel">
     <div class="panel-heading">
-      <div><h2>Latest gate capture</h2><p>Updated automatically when a plate is granted or denied</p></div>
+      <div><h2>Latest plate crop</h2><p>Winning enhanced crop from the latest recognition</p></div>
       <span id="latest-decision" class="status {{ latest_event.decision if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>{{ latest_event.decision if latest_event else '' }}</span>
     </div>
       <div id="latest-photo-frame" class="event-photo-frame" data-event-id="{{ latest_event.id if latest_event else '' }}" data-image-version="{{ latest_capture_version or latest_event.id if latest_event else '' }}" {% if not latest_event %}hidden{% endif %}>
-        <img id="latest-photo" {% if latest_event %}src="{{ url_for('latest_capture_image') if latest_capture_version else url_for('event_image', event_id=latest_event.id) }}?v={{ latest_capture_version or latest_event.id }}" alt="Annotated capture of plate {{ latest_event.plate_number }}"{% else %}alt="Latest annotated vehicle capture"{% endif %}>
+        <img id="latest-photo" {% if latest_event %}src="{{ url_for('latest_capture_image') if latest_capture_version else url_for('event_image', event_id=latest_event.id) }}?v={{ latest_capture_version or latest_event.id }}" alt="Enhanced crop of plate {{ latest_event.plate_number }}"{% else %}alt="Latest enhanced plate crop"{% endif %}>
       </div>
       <div id="latest-photo-details" class="event-photo-details" {% if not latest_event %}hidden{% endif %}>
         <span id="latest-plate" class="plate">{{ latest_event.plate_number if latest_event else '' }}</span>
         <strong id="latest-owner">{{ latest_event.owner_name or 'Unregistered vehicle' if latest_event else '' }}</strong>
         <span id="latest-time">{{ latest_event.local_time if latest_event else '' }}</span>
       </div>
-      <div id="latest-photo-placeholder" class="event-photo-placeholder" {% if latest_event %}hidden{% endif %}><strong>No vehicle captured yet</strong><span>The first granted or denied plate photo will appear here automatically.</span></div>
+      <div id="latest-photo-placeholder" class="event-photo-placeholder" {% if latest_event %}hidden{% endif %}><strong>No plate captured yet</strong><span>The first granted or denied plate crop will appear here automatically.</span></div>
   </section>
 
   <section class="panel wide-panel recent-panel">

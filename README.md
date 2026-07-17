@@ -44,16 +44,19 @@ From the `converted` folder, run:
 ```
 
 The camera remains open while YOLO and PP-OCRv5 stay completely idle. At the
-`plate-reader>` prompt, enter `capture` to acquire one fresh photo and run the
-complete YOLO detection, plate crop, enhancement, skew correction, OCR, and
-database authorization pipeline. The reader prints every processing stage and
-returns to idle when the capture finishes. Enter `status`, `help`, or `quit`
-for the other available commands.
+`plate-reader>` prompt, enter `capture` to acquire a five-frame burst. YOLO
+ranks each detected plate using confidence, sharpness, exposure, and visible
+plate size. PP-OCRv5 reads the best three crops, then exact voting,
+character-by-character voting, and edit-distance consensus choose the final
+clean value. The reader prints every processing stage and returns to idle when
+the capture finishes. Enter `status`, `help`, or `quit` for the other available
+commands.
 
-Requested full frames remain in memory only and are discarded as soon as each
-capture finishes. Enhanced plate crops are stored in `Output/Plate-Crops` and
-database events reference those crops. The dashboard keeps one overwritten
-`Output/latest-capture.jpg` annotated preview; it is never archived per event.
+Requested burst frames remain in memory only and are discarded as soon as each
+capture finishes. Only the winning enhanced plate crop is stored in
+`Output/Plate-Crops`, and the database event references that crop. The
+dashboard keeps one overwritten `Output/latest-plate-crop.jpg` plate-only preview
+from the winning crop; no raw frame is shown or stored by the website.
 If macOS asks for camera access, allow it for Terminal (or the app launching
 the command).
 
@@ -79,8 +82,9 @@ For a USB or V4L2 camera on the Pi, start on-demand headless mode with:
 ```
 
 Enter `capture` whenever the gate controller requests a recognition attempt.
-No YOLO or OCR inference occurs between capture commands, keeping idle CPU and
-memory use low on the Raspberry Pi 4.
+Each request processes five frames and OCRs at most three ranked crops; no YOLO
+or OCR inference occurs between commands, keeping idle CPU and memory use low
+on the Raspberry Pi 4.
 
 The Pi build uses the ARM OpenCV package supplied by Raspberry Pi OS. It is
 compiled for the Pi 4 Cortex-A72 CPU and limits compilation to two parallel
@@ -120,10 +124,10 @@ the administrator username and password. The site includes the live summary,
 registered-vehicle entry and editing, active/inactive authorization controls,
 the complete searchable access log, event snapshots, and CSV export. Starting
 the website also starts the on-demand camera reader in headless idle mode. The
-administrator uses the `Capture plate` button to request one fresh frame and
-one YOLO → crop/enhancement → OCR pass. The latest annotated preview then
-appears automatically without continuously streaming video or running idle
-inference.
+administrator uses the `Capture plate` button to request a five-frame burst and
+one quality-ranked YOLO → crop/enhancement → OCR consensus pass. The latest
+winning plate crop then appears automatically
+without continuously streaming video or running idle inference.
 Recognized registered vehicles are labeled with both the plate and owner, for
 example `ZAT255 Melson Bacuen`; denied unregistered vehicles retain the plate
 annotation without an owner name.

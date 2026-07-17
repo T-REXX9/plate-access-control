@@ -40,7 +40,7 @@ OUTPUT_DIR = PROJECT_DIR / "Output"
 CAMERA_PID_PATH = OUTPUT_DIR / "camera.pid"
 CAMERA_LOG_PATH = OUTPUT_DIR / "camera.log"
 CAMERA_COMMAND_PATH = OUTPUT_DIR / "camera-command.txt"
-LATEST_CAPTURE_PATH = OUTPUT_DIR / "latest-capture.jpg"
+LATEST_CAPTURE_PATH = OUTPUT_DIR / "latest-plate-crop.jpg"
 
 
 def load_secret_key() -> str:
@@ -836,7 +836,7 @@ def event_image(event_id: int):
     return send_file(image_path)
 
 
-@app.route("/latest-capture.jpg")
+@app.route("/latest-plate-crop.jpg")
 @login_required
 def latest_capture_image():
     if not LATEST_CAPTURE_PATH.is_file():

@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -377,6 +379,187 @@ struct AuthorizationResult {
     std::string ownerName;
 };
 
+struct BurstCandidate {
+    int frameIndex = 0;
+    Detection detection;
+    cv::Mat enhancedCrop;
+    double sharpness = 0.0;
+    double exposure = 0.0;
+    double quality = 0.0;
+};
+
+struct OcrVote {
+    std::string reading;
+    double quality = 0.0;
+    std::size_t candidateIndex = 0;
+};
+
+double plateSharpness(const cv::Mat& crop) {
+    cv::Mat gray;
+    cv::cvtColor(crop, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat laplacian;
+    cv::Laplacian(gray, laplacian, CV_64F);
+    cv::Scalar mean;
+    cv::Scalar deviation;
+    cv::meanStdDev(laplacian, mean, deviation);
+    return deviation[0] * deviation[0];
+}
+
+double plateExposureScore(const cv::Mat& crop) {
+    cv::Mat gray;
+    cv::cvtColor(crop, gray, cv::COLOR_BGR2GRAY);
+    const double brightness = cv::mean(gray)[0];
+    const double brightnessScore = std::clamp(
+        1.0 - std::abs(brightness - 135.0) / 135.0,
+        0.0,
+        1.0
+    );
+    cv::Mat shadows;
+    cv::Mat highlights;
+    cv::inRange(gray, cv::Scalar(0), cv::Scalar(15), shadows);
+    cv::inRange(gray, cv::Scalar(240), cv::Scalar(255), highlights);
+    const double clippedRatio = (
+        cv::countNonZero(shadows) + cv::countNonZero(highlights)
+    ) / static_cast<double>(gray.total());
+    return brightnessScore * std::clamp(1.0 - clippedRatio * 2.0, 0.0, 1.0);
+}
+
+double plateCandidateQuality(
+    const Detection& detection,
+    const cv::Size& frameSize,
+    double sharpness,
+    double exposure
+) {
+    const double sharpnessScore = std::clamp(
+        std::log1p(sharpness) / std::log(1001.0),
+        0.0,
+        1.0
+    );
+    const double areaRatio = detection.box.area() /
+        static_cast<double>(frameSize.area());
+    const double sizeScore = std::clamp(std::sqrt(areaRatio) / 0.20, 0.0, 1.0);
+    return detection.confidence * 0.45 +
+        sharpnessScore * 0.30 +
+        exposure * 0.15 +
+        sizeScore * 0.10;
+}
+
+int editDistance(const std::string& first, const std::string& second) {
+    std::vector<int> previous(second.size() + 1);
+    std::vector<int> current(second.size() + 1);
+    for (std::size_t index = 0; index <= second.size(); ++index) {
+        previous[index] = static_cast<int>(index);
+    }
+    for (std::size_t row = 1; row <= first.size(); ++row) {
+        current[0] = static_cast<int>(row);
+        for (std::size_t column = 1; column <= second.size(); ++column) {
+            const int substitution = previous[column - 1] +
+                (first[row - 1] == second[column - 1] ? 0 : 1);
+            current[column] = std::min({
+                previous[column] + 1,
+                current[column - 1] + 1,
+                substitution
+            });
+        }
+        std::swap(previous, current);
+    }
+    return previous.back();
+}
+
+std::string consensusPlate(const std::vector<OcrVote>& votes) {
+    std::vector<OcrVote> readable;
+    for (const OcrVote& vote : votes) {
+        if (!vote.reading.empty() && vote.reading != "UNREADABLE") {
+            readable.push_back(vote);
+        }
+    }
+    if (readable.empty()) {
+        return "UNREADABLE";
+    }
+    if (readable.size() == 1) {
+        return readable.front().reading;
+    }
+
+    struct VoteTotal {
+        int count = 0;
+        double weight = 0.0;
+    };
+    std::map<std::string, VoteTotal> exactVotes;
+    for (const OcrVote& vote : readable) {
+        VoteTotal& total = exactVotes[vote.reading];
+        ++total.count;
+        total.weight += vote.quality;
+    }
+    std::string exactWinner;
+    VoteTotal exactWinnerTotal;
+    for (const auto& [reading, total] : exactVotes) {
+        if (total.count > exactWinnerTotal.count ||
+            (total.count == exactWinnerTotal.count && total.weight > exactWinnerTotal.weight)) {
+            exactWinner = reading;
+            exactWinnerTotal = total;
+        }
+    }
+    if (exactWinnerTotal.count >= 2) {
+        return exactWinner;
+    }
+
+    std::map<std::size_t, VoteTotal> lengthVotes;
+    for (const OcrVote& vote : readable) {
+        VoteTotal& total = lengthVotes[vote.reading.size()];
+        ++total.count;
+        total.weight += vote.quality;
+    }
+    std::size_t consensusLength = 0;
+    VoteTotal lengthWinnerTotal;
+    for (const auto& [length, total] : lengthVotes) {
+        if (total.count > lengthWinnerTotal.count ||
+            (total.count == lengthWinnerTotal.count && total.weight > lengthWinnerTotal.weight)) {
+            consensusLength = length;
+            lengthWinnerTotal = total;
+        }
+    }
+    if (lengthWinnerTotal.count >= 2) {
+        std::string result;
+        result.reserve(consensusLength);
+        for (std::size_t position = 0; position < consensusLength; ++position) {
+            std::map<char, double> characterVotes;
+            for (const OcrVote& vote : readable) {
+                if (vote.reading.size() == consensusLength) {
+                    characterVotes[vote.reading[position]] += std::max(0.01, vote.quality);
+                }
+            }
+            const auto winner = std::max_element(
+                characterVotes.begin(),
+                characterVotes.end(),
+                [](const auto& first, const auto& second) {
+                    return first.second < second.second;
+                }
+            );
+            result.push_back(winner->first);
+        }
+        return result;
+    }
+
+    // When all readings have different lengths, choose the medoid: the OCR
+    // value with the smallest total edit distance to the other observations.
+    std::string medoid = readable.front().reading;
+    int bestDistance = std::numeric_limits<int>::max();
+    double bestQuality = -1.0;
+    for (const OcrVote& candidate : readable) {
+        int distance = 0;
+        for (const OcrVote& other : readable) {
+            distance += editDistance(candidate.reading, other.reading);
+        }
+        if (distance < bestDistance ||
+            (distance == bestDistance && candidate.quality > bestQuality)) {
+            medoid = candidate.reading;
+            bestDistance = distance;
+            bestQuality = candidate.quality;
+        }
+    }
+    return medoid;
+}
+
 class GateDatabase {
 public:
     explicit GateDatabase(const fs::path& path) {
@@ -564,7 +747,7 @@ int runCamera(
     camera.set(cv::CAP_PROP_BUFFERSIZE, 1);
     fs::create_directories(outputDirectory);
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
-    const fs::path latestCapturePath = outputDirectory / "latest-capture.jpg";
+    const fs::path latestCapturePath = outputDirectory / "latest-plate-crop.jpg";
     fs::create_directories(cropDirectory);
     if (!commandFile.empty()) {
         if (!commandFile.parent_path().empty()) {
@@ -632,7 +815,7 @@ int runCamera(
         }
         if (command == "help") {
             std::cout
-                << "capture  Grab one fresh frame and run YOLO, crop enhancement, and OCR.\n"
+                << "capture  Grab five fresh frames and run quality-ranked YOLO/OCR consensus.\n"
                 << "status   Show whether the camera and models are idle.\n"
                 << "quit     Release the camera and stop the reader.\n";
             continue;
@@ -652,82 +835,158 @@ int runCamera(
         ++captureNumber;
         const auto startedAt = std::chrono::steady_clock::now();
         gateDatabase.updateStatus("online", "active");
-        std::cout << "CAPTURE " << captureNumber << ": acquiring a fresh camera frame...\n";
+        constexpr int burstFrameCount = 5;
+        constexpr int ocrCandidateCount = 3;
+        std::cout << "CAPTURE " << captureNumber << ": acquiring "
+                  << burstFrameCount << " fresh camera frames...\n";
 
         // A camera that remains open while idle may have queued old frames.
-        // Discard several buffers so inference always receives a current photo.
-        cv::Mat frame;
-        bool frameReady = false;
-        for (int attempt = 0; attempt < 8; ++attempt) {
+        // Flush those buffers, then retain only a short in-memory burst.
+        cv::Mat discardedFrame;
+        for (int attempt = 0; attempt < 6; ++attempt) {
+            camera.read(discardedFrame);
+        }
+        std::vector<cv::Mat> frames;
+        frames.reserve(burstFrameCount);
+        for (int index = 0; index < burstFrameCount; ++index) {
+            cv::Mat frame;
             if (camera.read(frame) && !frame.empty()) {
-                frameReady = true;
+                frames.push_back(frame.clone());
             }
         }
-        if (!frameReady) {
-            std::cerr << "CAPTURE " << captureNumber << ": camera frame could not be read.\n";
+        if (frames.empty()) {
+            std::cerr << "CAPTURE " << captureNumber
+                      << ": camera burst could not be read.\n";
             gateDatabase.updateStatus("online", "idle");
             continue;
         }
+        std::cout << "CAPTURE " << captureNumber << ": captured "
+                  << frames.size() << '/' << burstFrameCount
+                  << " frames; running YOLO on the burst...\n";
         const std::string captureStem = fs::path(
             eventSnapshotName("CAPTURE", captureNumber)
         ).stem().string();
-        std::cout << "CAPTURE " << captureNumber
-                  << ": frame held in memory only; running YOLO...\n";
 
-        const std::vector<Detection> detections = detectPlates(detector, frame);
-        if (detections.empty()) {
+        std::vector<BurstCandidate> candidates;
+        for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
+            const cv::Mat& frame = frames[frameIndex];
+            const std::vector<Detection> detections = detectPlates(detector, frame);
+            std::cout << "CAPTURE " << captureNumber << ": frame "
+                      << frameIndex + 1 << '/' << frames.size() << " - YOLO found "
+                      << detections.size() << " plate region(s).\n";
+
+            bool foundFrameCandidate = false;
+            BurstCandidate bestFrameCandidate;
+            for (const Detection& detection : detections) {
+                const cv::Mat crop = frame(detection.box).clone();
+                const double sharpness = plateSharpness(crop);
+                const double exposure = plateExposureScore(crop);
+                const double quality = plateCandidateQuality(
+                    detection,
+                    frame.size(),
+                    sharpness,
+                    exposure
+                );
+                if (!foundFrameCandidate || quality > bestFrameCandidate.quality) {
+                    bestFrameCandidate = {
+                        static_cast<int>(frameIndex),
+                        detection,
+                        zoomPlate(crop),
+                        sharpness,
+                        exposure,
+                        quality
+                    };
+                    foundFrameCandidate = true;
+                }
+            }
+            if (foundFrameCandidate) {
+                candidates.push_back(std::move(bestFrameCandidate));
+            }
+        }
+
+        if (candidates.empty()) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - startedAt
             ).count();
-            std::cout << "CAPTURE " << captureNumber << ": NO PLATE DETECTED.\n";
+            std::cout << "CAPTURE " << captureNumber
+                      << ": NO PLATE DETECTED IN ANY BURST FRAME.\n";
             gateDatabase.updateStatus("online", "idle");
             std::cout << "CAPTURE " << captureNumber << ": complete in "
                       << elapsed << " ms; returning to IDLE.\n";
             continue;
         }
 
-        struct CaptureResult {
-            Detection detection;
-            std::string plate;
-            AuthorizationResult authorization;
-            fs::path cropPath;
-        };
-        std::vector<CaptureResult> results;
-        std::cout << "CAPTURE " << captureNumber << ": YOLO found "
-                  << detections.size() << " plate region(s).\n";
-
-        for (std::size_t index = 0; index < detections.size(); ++index) {
-            const Detection& detection = detections[index];
-            const cv::Mat crop = frame(detection.box).clone();
-            const cv::Mat enhanced = zoomPlate(crop);
-            const fs::path cropPath = cropDirectory /
-                (captureStem + "-plate-" + std::to_string(index + 1) + ".jpg");
-            cv::imwrite(cropPath.string(), enhanced, {cv::IMWRITE_JPEG_QUALITY, 95});
-            std::cout << "CAPTURE " << captureNumber << ": OCR plate "
-                      << index + 1 << " using " << cropPath.string() << "...\n";
-
-            const std::string plate = readPlate(recognizer, enhanced);
-            AuthorizationResult authorization;
-            cv::Scalar color(0, 200, 255);
-            std::string label = plate;
-            if (plate != "UNREADABLE") {
-                authorization = gateDatabase.authorize(plate);
-                color = authorization.authorized
-                    ? cv::Scalar(0, 210, 0)
-                    : cv::Scalar(0, 0, 230);
-                if (!authorization.ownerName.empty()) {
-                    label += " " + authorization.ownerName;
-                }
-            }
-            drawLabel(frame, detection.box, label, color);
-            results.push_back({detection, plate, authorization, cropPath});
-            std::cout << "CAPTURE " << captureNumber << ": OCR RESULT "
-                      << plate << " (YOLO " << std::fixed << std::setprecision(2)
-                      << detection.confidence << ")\n";
+        std::sort(candidates.begin(), candidates.end(), [](
+            const BurstCandidate& first,
+            const BurstCandidate& second
+        ) {
+            return first.quality > second.quality;
+        });
+        if (candidates.size() > ocrCandidateCount) {
+            candidates.resize(ocrCandidateCount);
         }
 
-        const fs::path temporaryLatest = outputDirectory / "latest-capture.tmp.jpg";
-        if (cv::imwrite(temporaryLatest.string(), frame, {cv::IMWRITE_JPEG_QUALITY, 92})) {
+        std::vector<OcrVote> votes;
+        votes.reserve(candidates.size());
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            const BurstCandidate& candidate = candidates[index];
+            const std::string reading = readPlate(recognizer, candidate.enhancedCrop);
+            votes.push_back({reading, candidate.quality, index});
+            std::cout << "CAPTURE " << captureNumber << ": OCR sample "
+                      << index + 1 << '/' << candidates.size()
+                      << " from frame " << candidate.frameIndex + 1
+                      << " = " << reading
+                      << " (quality " << std::fixed << std::setprecision(2)
+                      << candidate.quality << ", sharpness "
+                      << std::setprecision(0) << candidate.sharpness << ")\n";
+        }
+
+        const std::string plate = consensusPlate(votes);
+        std::size_t winnerIndex = 0;
+        int winnerDistance = std::numeric_limits<int>::max();
+        double winnerQuality = -1.0;
+        for (const OcrVote& vote : votes) {
+            const int distance = plate == "UNREADABLE" || vote.reading == "UNREADABLE"
+                ? std::numeric_limits<int>::max() / 2
+                : editDistance(vote.reading, plate);
+            if (distance < winnerDistance ||
+                (distance == winnerDistance && vote.quality > winnerQuality)) {
+                winnerIndex = vote.candidateIndex;
+                winnerDistance = distance;
+                winnerQuality = vote.quality;
+            }
+        }
+        const BurstCandidate& winner = candidates[winnerIndex];
+        cv::Mat annotatedFrame = frames[winner.frameIndex].clone();
+        const fs::path cropPath = cropDirectory / (captureStem + "-plate.jpg");
+        cv::imwrite(
+            cropPath.string(),
+            winner.enhancedCrop,
+            {cv::IMWRITE_JPEG_QUALITY, 95}
+        );
+
+        AuthorizationResult authorization;
+        cv::Scalar color(0, 200, 255);
+        std::string label = plate;
+        if (plate != "UNREADABLE") {
+            authorization = gateDatabase.authorize(plate);
+            color = authorization.authorized
+                ? cv::Scalar(0, 210, 0)
+                : cv::Scalar(0, 0, 230);
+            if (!authorization.ownerName.empty()) {
+                label += " " + authorization.ownerName;
+            }
+        }
+        drawLabel(annotatedFrame, winner.detection.box, label, color);
+        std::cout << "CAPTURE " << captureNumber << ": CONSENSUS " << plate
+                  << " from " << votes.size() << " OCR sample(s).\n";
+
+        const fs::path temporaryLatest = outputDirectory / "latest-plate-crop.tmp.jpg";
+        if (cv::imwrite(
+                temporaryLatest.string(),
+                winner.enhancedCrop,
+                {cv::IMWRITE_JPEG_QUALITY, 95}
+            )) {
             std::error_code error;
             fs::remove(latestCapturePath, error);
             error.clear();
@@ -738,37 +997,36 @@ int runCamera(
                           << error.message() << '\n';
             } else {
                 std::cout << "CAPTURE " << captureNumber
-                          << ": dashboard preview updated "
+                          << ": dashboard crop preview updated "
                           << latestCapturePath.string() << '\n';
             }
         }
 
-        for (const CaptureResult& result : results) {
-            if (result.plate == "UNREADABLE") {
-                std::cout << "UNREADABLE - plate region detected but OCR returned no value.\n";
-                continue;
-            }
-            gateDatabase.updateStatus("online", "active", result.plate);
+        if (plate == "UNREADABLE") {
+            std::cout << "UNREADABLE - plate regions were detected but the OCR burst "
+                      << "returned no value.\n";
+        } else {
+            gateDatabase.updateStatus("online", "active", plate);
             const bool inserted = gateDatabase.recordEvent(
-                result.plate,
-                result.authorization,
-                result.detection.confidence,
-                result.cropPath.string()
+                plate,
+                authorization,
+                winner.detection.confidence,
+                cropPath.string()
             );
             if (inserted) {
-                std::cout << (result.authorization.authorized ? "AUTHORIZED " : "DENIED ")
-                          << result.plate;
-                if (!result.authorization.ownerName.empty()) {
-                    std::cout << ' ' << result.authorization.ownerName;
+                std::cout << (authorization.authorized ? "AUTHORIZED " : "DENIED ")
+                          << plate;
+                if (!authorization.ownerName.empty()) {
+                    std::cout << ' ' << authorization.ownerName;
                 }
                 std::cout << '\n';
             } else {
-                std::cout << "DUPLICATE SUPPRESSED " << result.plate << '\n';
+                std::cout << "DUPLICATE SUPPRESSED " << plate << '\n';
             }
         }
 
         if (!headless) {
-            cv::imshow("On-demand License Plate Recognition", frame);
+            cv::imshow("On-demand License Plate Recognition", annotatedFrame);
             cv::waitKey(1);
         }
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -776,7 +1034,7 @@ int runCamera(
         ).count();
         gateDatabase.updateStatus("online", "idle");
         std::cout << "CAPTURE " << captureNumber << ": complete in "
-                  << elapsed << " ms; full frame discarded, returning to IDLE.\n";
+                  << elapsed << " ms; burst frames discarded, returning to IDLE.\n";
     }
 
     camera.release();

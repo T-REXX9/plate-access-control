@@ -88,7 +88,7 @@
       frame.dataset.imageVersion = imageVersion;
       image.src = `${event.image_url}?v=${encodeURIComponent(imageVersion)}`;
     }
-    image.alt = `Annotated capture of plate ${event.plate_number}`;
+    image.alt = `Enhanced crop of plate ${event.plate_number}`;
     text("latest-plate", event.plate_number);
     text("latest-owner", event.owner_name || "Unregistered vehicle");
     text("latest-time", event.local_time);
