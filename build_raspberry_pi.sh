@@ -13,7 +13,7 @@ case "$architecture" in
 esac
 
 sudo apt update
-sudo apt install -y build-essential cmake pkg-config libopencv-dev sqlite3 libsqlite3-dev python3 python3-venv
+sudo apt install -y build-essential cmake pkg-config libopencv-dev libcurl4-openssl-dev
 
 cmake \
     -S "$project_dir" \
@@ -25,9 +25,7 @@ cmake \
 # using more than one core.
 cmake --build "$project_dir/build-pi" --parallel 2
 
-"$project_dir/web/setup_web.sh"
-
 echo
 echo "Build complete. Run:"
 echo "cd \"$project_dir\""
-echo "./build-pi/plate_reader raw-images Output models/license_plate_detector.onnx"
+echo "PLATE_SERVER_URL=http://PC_IP:8080 PLATE_API_KEY=YOUR_KEY ./build-pi/plate_reader --camera 0 models/license_plate_detector.onnx models/en_PP-OCRv5_rec_mobile.onnx Output --headless"

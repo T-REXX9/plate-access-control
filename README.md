@@ -1,165 +1,98 @@
-# C++ License Plate Detection and OCR
+# Raspberry Pi Plate Reader
 
-This is the C++ conversion of the Python raw-image pipeline. It uses:
+This repository contains the lightweight Raspberry Pi side of the plate access
+control system. The Pi performs only camera capture, YOLO plate detection,
+crop/enhancement, and PP-OCRv5 recognition. It sends each result immediately to
+the separate PC web server and does not host a website or database.
 
-- OpenCV DNN with the exported YOLO ONNX model for plate detection
-- PP-OCRv5 English ONNX for neural plate-text recognition
-- A plate-only crop enlarged before OCR
-- Raw uppercase alphanumeric OCR output only; no country-specific formatting,
-  spaces, hyphens, punctuation, or filename-specific overrides
+## Recognition workflow
 
-## Build on macOS
+1. Keep the camera open while YOLO and OCR remain idle.
+2. On `capture`, acquire five fresh frames in memory.
+3. Run YOLO on all five frames and rank the best plate regions.
+4. Run PP-OCRv5 on the best three enhanced crops.
+5. Choose the final clean alphanumeric plate using OCR consensus.
+6. Store only the winning enhanced crop in `Output/Plate-Crops`.
+7. Send the plate, detector confidence, and crop to the PC server.
 
-```bash
-brew install cmake opencv
-cd converted
-cmake -S . -B build -DPLATE_ENABLE_CAMERA=ON
-cmake --build build -j
-```
+## Raspberry Pi 4 setup
 
-The Homebrew OpenCV package supplies detection, OCR preprocessing, camera
-capture, and the optional local preview window. Platform-specific OpenCV
-binaries are intentionally not stored in this repository.
-
-## Run
-
-Run this command from the `converted` folder:
+Use 64-bit Raspberry Pi OS and run:
 
 ```bash
-./build/plate_reader raw-images Output models/license_plate_detector.onnx
-```
-
-The OCR model defaults to `models/en_PP-OCRv5_rec_mobile.onnx`. You can pass a
-different compatible OCR model as the optional fifth argument.
-
-Annotated images are saved in `converted/Output`. Zoomed plate-only crops are
-saved in `converted/Output/Plate-Crops`.
-
-## On-demand camera recognition
-
-From the `converted` folder, run:
-
-```bash
-./build/plate_reader --camera 0
-```
-
-The camera remains open while YOLO and PP-OCRv5 stay completely idle. At the
-`plate-reader>` prompt, enter `capture` to acquire a five-frame burst. YOLO
-ranks each detected plate using confidence, sharpness, exposure, and visible
-plate size. PP-OCRv5 reads the best three crops, then exact voting,
-character-by-character voting, and edit-distance consensus choose the final
-clean value. The reader prints every processing stage and returns to idle when
-the capture finishes. Enter `status`, `help`, or `quit` for the other available
-commands.
-
-Requested burst frames remain in memory only and are discarded as soon as each
-capture finishes. Only the winning enhanced plate crop is stored in
-`Output/Plate-Crops`, and the database event references that crop. The
-dashboard keeps one overwritten `Output/latest-plate-crop.jpg` plate-only preview
-from the winning crop; no raw frame is shown or stored by the website.
-If macOS asks for camera access, allow it for Terminal (or the app launching
-the command).
-
-## Raspberry Pi 4 (4 GB)
-
-Use the current 64-bit Raspberry Pi OS (Trixie or newer), which supplies the
-required OpenCV 4.10 package. Copy the complete `converted` folder, including
-its `raw-images` folder, to the Pi, then run:
-
-```bash
-cd converted
 ./build_raspberry_pi.sh
-./build-pi/plate_reader raw-images Output models/license_plate_detector.onnx
 ```
 
-For a USB or V4L2 camera on the Pi, start on-demand headless mode with:
+The installer adds OpenCV, libcurl, CMake, and the C++ build tools, then builds
+the reader with Raspberry Pi 4 CPU tuning.
+
+## Connect it to the PC server
+
+Start the separate `plate-access-control-web` project on the PC. Find the PC's
+local IP address and copy the private value from its
+`database/reader_api.key` file.
+
+On the Raspberry Pi:
+
+```bash
+export PLATE_SERVER_URL=http://192.168.1.100:8080
+export PLATE_API_KEY=PASTE_THE_PRIVATE_KEY_HERE
+
+./build-pi/plate_reader --camera 0 \
+  models/license_plate_detector.onnx \
+  models/en_PP-OCRv5_rec_mobile.onnx \
+  Output --headless
+```
+
+Replace `192.168.1.100` with the PC's address. Use another camera index if the
+USB camera is not index `0`.
+
+At the prompt, enter:
+
+```text
+capture
+```
+
+The terminal prints the five-frame detection/OCR stages, the final plate, and
+the web server response. `status`, `help`, and `quit` remain available.
+
+The server address and key can also be supplied as command-line options:
 
 ```bash
 ./build-pi/plate_reader --camera 0 \
   models/license_plate_detector.onnx \
   models/en_PP-OCRv5_rec_mobile.onnx \
-  Output database/gate_access.db --headless
+  Output --headless \
+  --server-url http://192.168.1.100:8080 \
+  --api-key PASTE_THE_PRIVATE_KEY_HERE
 ```
 
-Enter `capture` whenever the gate controller requests a recognition attempt.
-Each request processes five frames and OCRs at most three ranked crops; no YOLO
-or OCR inference occurs between commands, keeping idle CPU and memory use low
-on the Raspberry Pi 4.
+Environment variables are preferred because they keep the secret out of shell
+history and process listings.
 
-The Pi build uses the ARM OpenCV package supplied by Raspberry Pi OS. It is
-compiled for the Pi 4 Cortex-A72 CPU and limits compilation to two parallel
-jobs so the build remains comfortable on a 4 GB device. Runtime OCR remains
-fully local and does not require Python, Tesseract, EasyOCR, or an internet
-connection.
-
-## Local database
-
-The portable SQLite database is stored at `database/gate_access.db`. It is
-included when the complete `converted` folder is copied to the Raspberry Pi.
-Its schema supports registered vehicles, access history, dashboard summaries,
-website accounts, audit history, settings, and system health.
-
-To initialize or safely update it:
+## macOS build
 
 ```bash
-./database/init_database.sh
+brew install cmake opencv curl
+cmake -S . -B build -DPLATE_ENABLE_CAMERA=ON
+cmake --build build -j
 ```
 
-The live camera reader checks stable plates against active vehicle records and
-writes authorized or denied events, detector confidence, timestamps, and
-snapshot paths directly to this database. Duplicate readings of the same plate
-are suppressed using the configured time window.
+Use the same command as above with `./build/plate_reader`. macOS camera access
+must be allowed for Terminal.
 
-## Local admin website
+## Process an image folder
 
-Install the small website environment once, then start it:
+Folder mode remains available and does not contact the server:
 
 ```bash
-./web/setup_web.sh
-./web/start_web.sh
+./build/plate_reader raw-images Output models/license_plate_detector.onnx
 ```
 
-Open `http://localhost:8080` on the same computer. On the first visit, create
-the administrator username and password. The site includes the live summary,
-registered-vehicle entry and editing, active/inactive authorization controls,
-the complete searchable access log, event snapshots, and CSV export. Starting
-the website also starts the on-demand camera reader in headless idle mode. The
-administrator uses the `Capture plate` button to request a five-frame burst and
-one quality-ranked YOLO → crop/enhancement → OCR consensus pass. The latest
-winning plate crop then appears automatically
-without continuously streaming video or running idle inference.
-Recognized registered vehicles are labeled with both the plate and owner, for
-example `ZAT255 Melson Bacuen`; denied unregistered vehicles retain the plate
-annotation without an owner name.
+Annotated images are written to `Output`, and enhanced plate crops are written
+to `Output/Plate-Crops`.
 
-The dashboard provides Capture plate, Start recognition, and Stop recognition
-controls for the actual camera process. System status and seven-day activity stay at the top,
-and the desktop overview is arranged to fit common laptop screens without page
-scrolling. The full access history remains available through `View all`.
-Dashboard counters, status, the latest capture, recent access, and seven-day
-activity synchronize in the background every two seconds without reloading the
-page or resetting its current position. Synchronization pauses in hidden tabs.
+## Private data
 
-Administrators can create read-only security-guard accounts from the `Guards`
-page. A guard can view only the overview, latest annotated event photo, and
-access logs. Vehicle administration, camera Start/Stop controls, CSV export,
-and guard-account management are hidden and rejected server-side. Deactivating
-a guard account also invalidates its existing login session.
-
-Camera index `0` is used by default. To use another camera, run:
-
-```bash
-CAMERA_INDEX=1 ./web/start_web.sh
-```
-
-For website-only maintenance without opening a camera, run:
-
-```bash
-START_CAMERA=0 ./web/start_web.sh
-```
-
-After copying the complete folder to a Raspberry Pi, run
-`./build_raspberry_pi.sh`; it installs the Pi dependencies and rebuilds the web
-environment for Linux/ARM automatically. Start the site with
-`./web/start_web.sh`, then open `http://raspberrypi.local:8080` from another
-device on the same local network.
+Do not commit the PC server API key. Models are included so the Pi can run YOLO
+and OCR locally without Python, EasyOCR, Tesseract, or an internet connection.

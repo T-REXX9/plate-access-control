@@ -4,16 +4,11 @@
 /build/
 /build-minimal/
 /build-pi/
-/.web-venv/
 /vendor/
 
 # Private runtime data and generated camera output
 /raw-images/
 /Output/
-/database/*.db
-/database/*.db-shm
-/database/*.db-wal
-/database/web_secret.key
 
 # Python caches
 __pycache__/

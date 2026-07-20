@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -17,9 +18,9 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #ifdef PLATE_ENABLE_CAMERA
+#include <curl/curl.h>
 #include <opencv2/highgui.hpp>
 #include <opencv2/videoio.hpp>
-#include <sqlite3.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -373,12 +374,6 @@ bool supportedImage(const fs::path& path) {
 }
 
 #ifdef PLATE_ENABLE_CAMERA
-struct AuthorizationResult {
-    bool authorized = false;
-    int vehicleId = -1;
-    std::string ownerName;
-};
-
 struct BurstCandidate {
     int frameIndex = 0;
     Detection detection;
@@ -560,148 +555,70 @@ std::string consensusPlate(const std::vector<OcrVote>& votes) {
     return medoid;
 }
 
-class GateDatabase {
-public:
-    explicit GateDatabase(const fs::path& path) {
-        if (sqlite3_open_v2(
-                path.string().c_str(),
-                &database_,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
-                nullptr
-            ) != SQLITE_OK) {
-            std::cerr << "Database unavailable: "
-                      << (database_ ? sqlite3_errmsg(database_) : "unable to open file")
-                      << '\n';
-            if (database_) {
-                sqlite3_close(database_);
-                database_ = nullptr;
-            }
-            return;
-        }
-        sqlite3_busy_timeout(database_, 10000);
-        sqlite3_exec(database_, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr);
-        sqlite3_exec(database_, "PRAGMA journal_mode = WAL", nullptr, nullptr, nullptr);
+size_t appendHttpResponse(char* data, size_t size, size_t count, void* target) {
+    const size_t bytes = size * count;
+    static_cast<std::string*>(target)->append(data, bytes);
+    return bytes;
+}
+
+bool sendRecognition(
+    const std::string& serverUrl,
+    const std::string& apiKey,
+    const std::string& plate,
+    float detectorConfidence,
+    const fs::path& cropPath,
+    std::string& responseBody
+) {
+    if (serverUrl.empty() || apiKey.empty()) {
+        responseBody = "PLATE_SERVER_URL or PLATE_API_KEY is not configured";
+        return false;
+    }
+    CURL* client = curl_easy_init();
+    if (!client) {
+        responseBody = "unable to initialize HTTP client";
+        return false;
     }
 
-    ~GateDatabase() {
-        if (database_) {
-            sqlite3_close(database_);
-        }
+    std::string endpoint = serverUrl;
+    while (!endpoint.empty() && endpoint.back() == '/') {
+        endpoint.pop_back();
     }
+    endpoint += "/api/reader/recognitions";
+    const std::string confidence = std::to_string(detectorConfidence);
+    const std::string apiHeader = "X-API-Key: " + apiKey;
+    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
+    curl_mime* form = curl_mime_init(client);
 
-    bool available() const {
-        return database_ != nullptr;
+    curl_mimepart* part = curl_mime_addpart(form);
+    curl_mime_name(part, "plate");
+    curl_mime_data(part, plate.c_str(), CURL_ZERO_TERMINATED);
+    part = curl_mime_addpart(form);
+    curl_mime_name(part, "detector_confidence");
+    curl_mime_data(part, confidence.c_str(), CURL_ZERO_TERMINATED);
+    part = curl_mime_addpart(form);
+    curl_mime_name(part, "image");
+    curl_mime_type(part, "image/jpeg");
+    curl_mime_filedata(part, cropPath.string().c_str());
+
+    curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(client, CURLOPT_MIMEPOST, form);
+    curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(client, CURLOPT_TIMEOUT_MS, 15000L);
+    curl_easy_setopt(client, CURLOPT_WRITEFUNCTION, appendHttpResponse);
+    curl_easy_setopt(client, CURLOPT_WRITEDATA, &responseBody);
+
+    const CURLcode result = curl_easy_perform(client);
+    long status = 0;
+    curl_easy_getinfo(client, CURLINFO_RESPONSE_CODE, &status);
+    if (result != CURLE_OK) {
+        responseBody = curl_easy_strerror(result);
     }
-
-    AuthorizationResult authorize(const std::string& plate) {
-        AuthorizationResult result;
-        if (!database_) {
-            return result;
-        }
-        sqlite3_stmt* statement = nullptr;
-        constexpr const char* sql =
-            "SELECT id, owner_name FROM vehicles "
-            "WHERE plate_number = ? AND is_active = 1 "
-            "AND (registration_expires_on IS NULL OR registration_expires_on = '' "
-            "OR date(registration_expires_on) >= date('now', 'localtime')) "
-            "LIMIT 1";
-        if (sqlite3_prepare_v2(database_, sql, -1, &statement, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(statement, 1, plate.c_str(), -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(statement) == SQLITE_ROW) {
-                result.authorized = true;
-                result.vehicleId = sqlite3_column_int(statement, 0);
-                const unsigned char* owner = sqlite3_column_text(statement, 1);
-                if (owner) {
-                    result.ownerName = reinterpret_cast<const char*>(owner);
-                }
-            }
-        }
-        sqlite3_finalize(statement);
-        return result;
-    }
-
-    bool isRecentDuplicate(const std::string& plate) {
-        if (!database_) {
-            return false;
-        }
-        sqlite3_stmt* statement = nullptr;
-        constexpr const char* sql =
-            "SELECT 1 FROM access_events "
-            "WHERE plate_number = ? AND detected_at >= datetime(" 
-            "'now', '-' || coalesce((SELECT value FROM settings "
-            "WHERE key = 'duplicate_event_seconds'), '30') || ' seconds') LIMIT 1";
-        bool duplicate = false;
-        if (sqlite3_prepare_v2(database_, sql, -1, &statement, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(statement, 1, plate.c_str(), -1, SQLITE_TRANSIENT);
-            duplicate = sqlite3_step(statement) == SQLITE_ROW;
-        }
-        sqlite3_finalize(statement);
-        return duplicate;
-    }
-
-    bool recordEvent(
-        const std::string& plate,
-        const AuthorizationResult& authorization,
-        float detectorConfidence,
-        const std::string& imagePath
-    ) {
-        if (!database_ || isRecentDuplicate(plate)) {
-            return false;
-        }
-        sqlite3_stmt* statement = nullptr;
-        constexpr const char* sql =
-            "INSERT INTO access_events "
-            "(vehicle_id, plate_number, decision, gate_action, detector_confidence, image_path) "
-            "VALUES (?, ?, ?, 'not_requested', ?, ?)";
-        bool inserted = false;
-        if (sqlite3_prepare_v2(database_, sql, -1, &statement, nullptr) == SQLITE_OK) {
-            if (authorization.vehicleId >= 0) {
-                sqlite3_bind_int(statement, 1, authorization.vehicleId);
-            } else {
-                sqlite3_bind_null(statement, 1);
-            }
-            sqlite3_bind_text(statement, 2, plate.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(
-                statement,
-                3,
-                authorization.authorized ? "authorized" : "denied",
-                -1,
-                SQLITE_STATIC
-            );
-            sqlite3_bind_double(statement, 4, detectorConfidence);
-            sqlite3_bind_text(statement, 5, imagePath.c_str(), -1, SQLITE_TRANSIENT);
-            inserted = sqlite3_step(statement) == SQLITE_DONE;
-        }
-        sqlite3_finalize(statement);
-        return inserted;
-    }
-
-    void updateStatus(
-        const std::string& cameraState,
-        const std::string& detectorState,
-        const std::string& lastPlate = ""
-    ) {
-        if (!database_) {
-            return;
-        }
-        sqlite3_stmt* statement = nullptr;
-        constexpr const char* sql =
-            "UPDATE system_status SET camera_state = ?, detector_state = ?, "
-            "last_plate = CASE WHEN ? = '' THEN last_plate ELSE ? END, "
-            "last_heartbeat = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1";
-        if (sqlite3_prepare_v2(database_, sql, -1, &statement, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(statement, 1, cameraState.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(statement, 2, detectorState.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(statement, 3, lastPlate.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(statement, 4, lastPlate.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(statement);
-        }
-        sqlite3_finalize(statement);
-    }
-
-private:
-    sqlite3* database_ = nullptr;
-};
+    curl_mime_free(form);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(client);
+    return result == CURLE_OK && status >= 200 && status < 300;
+}
 
 std::string eventSnapshotName(const std::string& plate, int frameNumber) {
     const auto now = std::chrono::system_clock::now();
@@ -723,7 +640,8 @@ int runCamera(
     cv::dnn::Net& recognizer,
     int cameraIndex,
     const fs::path& outputDirectory,
-    const fs::path& databasePath,
+    const std::string& serverUrl,
+    const std::string& apiKey,
     bool headless,
     const fs::path& commandFile
 ) {
@@ -747,7 +665,6 @@ int runCamera(
     camera.set(cv::CAP_PROP_BUFFERSIZE, 1);
     fs::create_directories(outputDirectory);
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
-    const fs::path latestCapturePath = outputDirectory / "latest-plate-crop.jpg";
     fs::create_directories(cropDirectory);
     if (!commandFile.empty()) {
         if (!commandFile.parent_path().empty()) {
@@ -756,15 +673,9 @@ int runCamera(
         std::error_code error;
         fs::remove(commandFile, error);
     }
-    GateDatabase gateDatabase(databasePath);
-    if (!gateDatabase.available()) {
-        std::cerr << "Recognition will continue, but access events cannot be recorded.\n";
-    }
-
     if (!headless) {
         cv::namedWindow("On-demand License Plate Recognition", cv::WINDOW_NORMAL);
     }
-    gateDatabase.updateStatus("online", "idle");
     std::cout
         << "Camera ready in on-demand mode. YOLO and OCR are idle.\n"
         << "Commands: capture | status | help | quit\n";
@@ -774,7 +685,6 @@ int runCamera(
 
     int captureNumber = 0;
     std::string command;
-    auto lastHeartbeat = std::chrono::steady_clock::now();
     while (true) {
         command.clear();
         if (commandFile.empty()) {
@@ -791,11 +701,6 @@ int runCamera(
                     std::error_code error;
                     fs::remove(commandFile, error);
                 } else {
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - lastHeartbeat >= std::chrono::seconds(1)) {
-                        gateDatabase.updateStatus("online", "idle");
-                        lastHeartbeat = now;
-                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
@@ -834,7 +739,6 @@ int runCamera(
 
         ++captureNumber;
         const auto startedAt = std::chrono::steady_clock::now();
-        gateDatabase.updateStatus("online", "active");
         constexpr int burstFrameCount = 5;
         constexpr int ocrCandidateCount = 3;
         std::cout << "CAPTURE " << captureNumber << ": acquiring "
@@ -857,7 +761,6 @@ int runCamera(
         if (frames.empty()) {
             std::cerr << "CAPTURE " << captureNumber
                       << ": camera burst could not be read.\n";
-            gateDatabase.updateStatus("online", "idle");
             continue;
         }
         std::cout << "CAPTURE " << captureNumber << ": captured "
@@ -910,7 +813,6 @@ int runCamera(
             ).count();
             std::cout << "CAPTURE " << captureNumber
                       << ": NO PLATE DETECTED IN ANY BURST FRAME.\n";
-            gateDatabase.updateStatus("online", "idle");
             std::cout << "CAPTURE " << captureNumber << ": complete in "
                       << elapsed << " ms; returning to IDLE.\n";
             continue;
@@ -965,63 +867,29 @@ int runCamera(
             {cv::IMWRITE_JPEG_QUALITY, 95}
         );
 
-        AuthorizationResult authorization;
         cv::Scalar color(0, 200, 255);
-        std::string label = plate;
-        if (plate != "UNREADABLE") {
-            authorization = gateDatabase.authorize(plate);
-            color = authorization.authorized
-                ? cv::Scalar(0, 210, 0)
-                : cv::Scalar(0, 0, 230);
-            if (!authorization.ownerName.empty()) {
-                label += " " + authorization.ownerName;
-            }
-        }
-        drawLabel(annotatedFrame, winner.detection.box, label, color);
+        drawLabel(annotatedFrame, winner.detection.box, plate, color);
         std::cout << "CAPTURE " << captureNumber << ": CONSENSUS " << plate
                   << " from " << votes.size() << " OCR sample(s).\n";
-
-        const fs::path temporaryLatest = outputDirectory / "latest-plate-crop.tmp.jpg";
-        if (cv::imwrite(
-                temporaryLatest.string(),
-                winner.enhancedCrop,
-                {cv::IMWRITE_JPEG_QUALITY, 95}
-            )) {
-            std::error_code error;
-            fs::remove(latestCapturePath, error);
-            error.clear();
-            fs::rename(temporaryLatest, latestCapturePath, error);
-            if (error) {
-                std::cerr << "CAPTURE " << captureNumber
-                          << ": unable to publish the annotated dashboard photo: "
-                          << error.message() << '\n';
-            } else {
-                std::cout << "CAPTURE " << captureNumber
-                          << ": dashboard crop preview updated "
-                          << latestCapturePath.string() << '\n';
-            }
-        }
 
         if (plate == "UNREADABLE") {
             std::cout << "UNREADABLE - plate regions were detected but the OCR burst "
                       << "returned no value.\n";
         } else {
-            gateDatabase.updateStatus("online", "active", plate);
-            const bool inserted = gateDatabase.recordEvent(
+            std::string serverResponse;
+            const bool sent = sendRecognition(
+                serverUrl,
+                apiKey,
                 plate,
-                authorization,
                 winner.detection.confidence,
-                cropPath.string()
+                cropPath,
+                serverResponse
             );
-            if (inserted) {
-                std::cout << (authorization.authorized ? "AUTHORIZED " : "DENIED ")
-                          << plate;
-                if (!authorization.ownerName.empty()) {
-                    std::cout << ' ' << authorization.ownerName;
-                }
-                std::cout << '\n';
+            if (sent) {
+                std::cout << "SERVER ACCEPTED " << plate << ' ' << serverResponse << '\n';
             } else {
-                std::cout << "DUPLICATE SUPPRESSED " << plate << '\n';
+                std::cerr << "SERVER SEND FAILED " << plate << ": "
+                          << serverResponse << '\n';
             }
         }
 
@@ -1032,13 +900,11 @@ int runCamera(
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - startedAt
         ).count();
-        gateDatabase.updateStatus("online", "idle");
         std::cout << "CAPTURE " << captureNumber << ": complete in "
                   << elapsed << " ms; burst frames discarded, returning to IDLE.\n";
     }
 
     camera.release();
-    gateDatabase.updateStatus("offline", "stopped");
     if (!headless) {
         cv::destroyAllWindows();
     }
@@ -1066,14 +932,20 @@ int main(int argc, char** argv) {
     const fs::path ocrModelPath = argc > 4
         ? argv[4]
         : "models/en_PP-OCRv5_rec_mobile.onnx";
-    const fs::path databasePath = cameraMode && argc > 6
-        ? argv[6]
-        : "database/gate_access.db";
     fs::path commandFile;
+    std::string serverUrl = std::getenv("PLATE_SERVER_URL")
+        ? std::getenv("PLATE_SERVER_URL")
+        : "";
+    std::string apiKey = std::getenv("PLATE_API_KEY")
+        ? std::getenv("PLATE_API_KEY")
+        : "";
     for (int index = 1; index + 1 < argc; ++index) {
         if (std::string(argv[index]) == "--command-file") {
             commandFile = argv[index + 1];
-            break;
+        } else if (std::string(argv[index]) == "--server-url") {
+            serverUrl = argv[index + 1];
+        } else if (std::string(argv[index]) == "--api-key") {
+            apiKey = argv[index + 1];
         }
     }
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
@@ -1092,7 +964,8 @@ int main(int argc, char** argv) {
             recognizer,
             cameraIndex,
             outputDirectory,
-            databasePath,
+            serverUrl,
+            apiKey,
             headless,
             commandFile
         );
