@@ -8,12 +8,13 @@ the separate PC web server and does not host a website or database.
 ## Recognition workflow
 
 1. Keep the camera open while YOLO and OCR remain idle.
-2. On `capture`, acquire five fresh frames in memory.
-3. Run YOLO on all five frames and rank the best plate regions.
-4. Run PP-OCRv5 on the best three enhanced crops.
-5. Choose the final clean alphanumeric plate using OCR consensus.
-6. Store only the winning enhanced crop in `Output/Plate-Crops`.
-7. Send the plate, detector confidence, and crop to the PC server.
+2. Wait for an administrator to press **Capture plate** on the PC dashboard.
+3. Acquire five fresh frames in memory for that queued request.
+4. Run YOLO on all five frames and rank the best plate regions.
+5. Run PP-OCRv5 on the best three enhanced crops.
+6. Choose the final clean alphanumeric plate using OCR consensus.
+7. Store only the winning enhanced crop in `Output/Plate-Crops`.
+8. Send the plate, detector confidence, and crop to the PC server.
 
 ## Raspberry Pi 4 setup
 
@@ -28,7 +29,7 @@ the reader with Raspberry Pi 4 CPU tuning.
 
 ## Connect it to the PC server
 
-Start the separate `plate-access-control-web` project on the PC. That website
+Start the separate `plate-program` project on the PC. That website
 uses native MySQL locally; the Pi never connects to MySQL. It sends recognition
 results only to the protected Flask API.
 
@@ -50,8 +51,9 @@ Start the reader with:
 ./start_reader.sh
 ```
 
-The launcher checks the PC website before opening the camera. The API key stays
-in the environment and is not placed in the command line or process listing.
+The launcher checks the PC website before opening the camera, then polls its
+capture queue while inference stays idle. The API key stays in the environment
+and is not placed in the command line or process listing.
 
 To test only the PC connection without opening the camera:
 
@@ -59,14 +61,8 @@ To test only the PC connection without opening the camera:
 ./start_reader.sh --check
 ```
 
-At the prompt, enter:
-
-```text
-capture
-```
-
-The terminal prints the five-frame detection/OCR stages, the final plate, and
-the web server response. `status`, `help`, and `quit` remain available.
+Press **Capture plate** on the administrator dashboard. The Pi terminal prints
+the five-frame detection/OCR stages, final plate, and web server response.
 
 For temporary maintenance, the server address and key can still be supplied as
 environment variables:

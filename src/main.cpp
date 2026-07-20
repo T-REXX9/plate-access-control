@@ -567,6 +567,7 @@ bool sendRecognition(
     const std::string& plate,
     float detectorConfidence,
     const fs::path& cropPath,
+    long commandId,
     std::string& responseBody
 ) {
     if (serverUrl.empty() || apiKey.empty()) {
@@ -595,6 +596,12 @@ bool sendRecognition(
     part = curl_mime_addpart(form);
     curl_mime_name(part, "detector_confidence");
     curl_mime_data(part, confidence.c_str(), CURL_ZERO_TERMINATED);
+    if (commandId > 0) {
+        const std::string commandIdText = std::to_string(commandId);
+        part = curl_mime_addpart(form);
+        curl_mime_name(part, "command_id");
+        curl_mime_data(part, commandIdText.c_str(), CURL_ZERO_TERMINATED);
+    }
     part = curl_mime_addpart(form);
     curl_mime_name(part, "image");
     curl_mime_type(part, "image/jpeg");
@@ -614,6 +621,152 @@ bool sendRecognition(
     if (result != CURLE_OK) {
         responseBody = curl_easy_strerror(result);
     }
+    curl_mime_free(form);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(client);
+    return result == CURLE_OK && status >= 200 && status < 300;
+}
+
+enum class RemoteCommandPoll {
+    None,
+    Capture,
+    Error
+};
+
+std::string serverEndpoint(const std::string& serverUrl, const std::string& path) {
+    std::string endpoint = serverUrl;
+    while (!endpoint.empty() && endpoint.back() == '/') {
+        endpoint.pop_back();
+    }
+    return endpoint + path;
+}
+
+bool parseJsonLong(const std::string& body, const std::string& field, long& value) {
+    const std::string key = "\"" + field + "\"";
+    std::size_t position = body.find(key);
+    if (position == std::string::npos) {
+        return false;
+    }
+    position = body.find(':', position + key.size());
+    if (position == std::string::npos) {
+        return false;
+    }
+    ++position;
+    while (position < body.size() && std::isspace(static_cast<unsigned char>(body[position]))) {
+        ++position;
+    }
+    std::size_t end = position;
+    while (end < body.size() && std::isdigit(static_cast<unsigned char>(body[end]))) {
+        ++end;
+    }
+    if (end == position) {
+        return false;
+    }
+    try {
+        value = std::stol(body.substr(position, end - position));
+        return value > 0;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+RemoteCommandPoll pollRemoteCommand(
+    const std::string& serverUrl,
+    const std::string& apiKey,
+    long& commandId,
+    std::string& errorMessage
+) {
+    commandId = 0;
+    errorMessage.clear();
+    if (serverUrl.empty() || apiKey.empty()) {
+        errorMessage = "PLATE_SERVER_URL or PLATE_API_KEY is not configured";
+        return RemoteCommandPoll::Error;
+    }
+
+    CURL* client = curl_easy_init();
+    if (!client) {
+        errorMessage = "unable to initialize HTTP client";
+        return RemoteCommandPoll::Error;
+    }
+    std::string responseBody;
+    const std::string endpoint = serverEndpoint(serverUrl, "/api/reader/commands/next");
+    const std::string apiHeader = "X-API-Key: " + apiKey;
+    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
+    curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(client, CURLOPT_POST, 1L);
+    curl_easy_setopt(client, CURLOPT_POSTFIELDS, "");
+    curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(client, CURLOPT_TIMEOUT_MS, 10000L);
+    curl_easy_setopt(client, CURLOPT_WRITEFUNCTION, appendHttpResponse);
+    curl_easy_setopt(client, CURLOPT_WRITEDATA, &responseBody);
+
+    const CURLcode result = curl_easy_perform(client);
+    long status = 0;
+    curl_easy_getinfo(client, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(client);
+
+    if (result != CURLE_OK) {
+        errorMessage = curl_easy_strerror(result);
+        return RemoteCommandPoll::Error;
+    }
+    if (status == 204) {
+        return RemoteCommandPoll::None;
+    }
+    if (status < 200 || status >= 300) {
+        errorMessage = responseBody.empty()
+            ? "website returned HTTP " + std::to_string(status)
+            : responseBody;
+        return RemoteCommandPoll::Error;
+    }
+    if (responseBody.find("\"capture\"") == std::string::npos ||
+        !parseJsonLong(responseBody, "command_id", commandId)) {
+        errorMessage = "website returned an invalid capture command";
+        return RemoteCommandPoll::Error;
+    }
+    return RemoteCommandPoll::Capture;
+}
+
+bool reportRemoteCommand(
+    const std::string& serverUrl,
+    const std::string& apiKey,
+    long commandId,
+    bool success,
+    const std::string& message
+) {
+    if (commandId <= 0) {
+        return true;
+    }
+    CURL* client = curl_easy_init();
+    if (!client) {
+        return false;
+    }
+    const std::string endpoint = serverEndpoint(
+        serverUrl,
+        "/api/reader/commands/" + std::to_string(commandId) + "/complete"
+    );
+    const std::string apiHeader = "X-API-Key: " + apiKey;
+    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
+    curl_mime* form = curl_mime_init(client);
+    curl_mimepart* part = curl_mime_addpart(form);
+    curl_mime_name(part, "status");
+    curl_mime_data(part, success ? "completed" : "failed", CURL_ZERO_TERMINATED);
+    part = curl_mime_addpart(form);
+    curl_mime_name(part, "message");
+    curl_mime_data(part, message.c_str(), CURL_ZERO_TERMINATED);
+
+    std::string responseBody;
+    curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(client, CURLOPT_MIMEPOST, form);
+    curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(client, CURLOPT_TIMEOUT_MS, 10000L);
+    curl_easy_setopt(client, CURLOPT_WRITEFUNCTION, appendHttpResponse);
+    curl_easy_setopt(client, CURLOPT_WRITEDATA, &responseBody);
+    const CURLcode result = curl_easy_perform(client);
+    long status = 0;
+    curl_easy_getinfo(client, CURLINFO_RESPONSE_CODE, &status);
     curl_mime_free(form);
     curl_slist_free_all(headers);
     curl_easy_cleanup(client);
@@ -643,7 +796,8 @@ int runCamera(
     const std::string& serverUrl,
     const std::string& apiKey,
     bool headless,
-    const fs::path& commandFile
+    const fs::path& commandFile,
+    bool remoteCommands
 ) {
     std::cout << std::unitbuf;
     cv::VideoCapture camera;
@@ -676,10 +830,13 @@ int runCamera(
     if (!headless) {
         cv::namedWindow("On-demand License Plate Recognition", cv::WINDOW_NORMAL);
     }
-    std::cout
-        << "Camera ready in on-demand mode. YOLO and OCR are idle.\n"
-        << "Commands: capture | status | help | quit\n";
-    if (!commandFile.empty()) {
+    std::cout << "Camera ready in on-demand mode. YOLO and OCR are idle.\n";
+    if (remoteCommands) {
+        std::cout << "Waiting for Capture requests from the website.\n";
+    } else {
+        std::cout << "Commands: capture | status | help | quit\n";
+    }
+    if (!remoteCommands && !commandFile.empty()) {
         std::cout << "Waiting for website commands in " << commandFile.string() << ".\n";
     }
 
@@ -687,7 +844,33 @@ int runCamera(
     std::string command;
     while (true) {
         command.clear();
-        if (commandFile.empty()) {
+        long activeCommandId = 0;
+        if (remoteCommands) {
+            auto lastError = std::chrono::steady_clock::time_point{};
+            while (command.empty()) {
+                std::string pollError;
+                const RemoteCommandPoll result = pollRemoteCommand(
+                    serverUrl,
+                    apiKey,
+                    activeCommandId,
+                    pollError
+                );
+                if (result == RemoteCommandPoll::Capture) {
+                    command = "capture";
+                    std::cout << "REMOTE CAPTURE " << activeCommandId << ": received from website.\n";
+                } else if (result == RemoteCommandPoll::Error) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (lastError.time_since_epoch().count() == 0 ||
+                        now - lastError >= std::chrono::seconds(10)) {
+                        std::cerr << "WEBSITE POLL FAILED: " << pollError << '\n';
+                        lastError = now;
+                    }
+                }
+                if (command.empty()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            }
+        } else if (commandFile.empty()) {
             std::cout << "plate-reader> " << std::flush;
             if (!std::getline(std::cin, command)) {
                 break;
@@ -761,6 +944,13 @@ int runCamera(
         if (frames.empty()) {
             std::cerr << "CAPTURE " << captureNumber
                       << ": camera burst could not be read.\n";
+            reportRemoteCommand(
+                serverUrl,
+                apiKey,
+                activeCommandId,
+                false,
+                "Camera burst could not be read"
+            );
             continue;
         }
         std::cout << "CAPTURE " << captureNumber << ": captured "
@@ -815,6 +1005,13 @@ int runCamera(
                       << ": NO PLATE DETECTED IN ANY BURST FRAME.\n";
             std::cout << "CAPTURE " << captureNumber << ": complete in "
                       << elapsed << " ms; returning to IDLE.\n";
+            reportRemoteCommand(
+                serverUrl,
+                apiKey,
+                activeCommandId,
+                true,
+                "No plate detected"
+            );
             continue;
         }
 
@@ -875,6 +1072,13 @@ int runCamera(
         if (plate == "UNREADABLE") {
             std::cout << "UNREADABLE - plate regions were detected but the OCR burst "
                       << "returned no value.\n";
+            reportRemoteCommand(
+                serverUrl,
+                apiKey,
+                activeCommandId,
+                true,
+                "OCR returned unreadable"
+            );
         } else {
             std::string serverResponse;
             const bool sent = sendRecognition(
@@ -883,6 +1087,7 @@ int runCamera(
                 plate,
                 winner.detection.confidence,
                 cropPath,
+                activeCommandId,
                 serverResponse
             );
             if (sent) {
@@ -890,6 +1095,13 @@ int runCamera(
             } else {
                 std::cerr << "SERVER SEND FAILED " << plate << ": "
                           << serverResponse << '\n';
+                reportRemoteCommand(
+                    serverUrl,
+                    apiKey,
+                    activeCommandId,
+                    false,
+                    "Recognition upload failed: " + serverResponse
+                );
             }
         }
 
@@ -918,6 +1130,11 @@ int main(int argc, char** argv) {
         argv + 1,
         argv + argc,
         [](const char* argument) { return std::string(argument) == "--headless"; }
+    ) != argv + argc;
+    const bool remoteCommands = std::find_if(
+        argv + 1,
+        argv + argc,
+        [](const char* argument) { return std::string(argument) == "--remote-commands"; }
     ) != argv + argc;
     const int cameraIndex = cameraMode && argc > 2 ? std::stoi(argv[2]) : 0;
     const fs::path inputDirectory = cameraMode
@@ -967,7 +1184,8 @@ int main(int argc, char** argv) {
             serverUrl,
             apiKey,
             headless,
-            commandFile
+            commandFile,
+            remoteCommands
         );
 #else
         std::cerr << "Camera support was disabled when this executable was built.\n";

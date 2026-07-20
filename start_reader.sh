@@ -44,8 +44,8 @@ fi
 
 cd "$project_dir"
 echo "PC website connected: $PLATE_SERVER_URL"
-echo "Starting camera $CAMERA_INDEX in idle on-demand mode."
+echo "Starting camera $CAMERA_INDEX in idle mode; Capture requests come from the website."
 exec "$reader" --camera "$CAMERA_INDEX" \
     models/license_plate_detector.onnx \
     models/en_PP-OCRv5_rec_mobile.onnx \
-    Output --headless
+    Output --headless --remote-commands
