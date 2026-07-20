@@ -23,29 +23,41 @@ Use 64-bit Raspberry Pi OS and run:
 ./build_raspberry_pi.sh
 ```
 
-The installer adds OpenCV, libcurl, CMake, and the C++ build tools, then builds
+The installer adds OpenCV, libcurl, curl, CMake, and the C++ build tools, then builds
 the reader with Raspberry Pi 4 CPU tuning.
 
 ## Connect it to the PC server
 
-Start the separate `plate-access-control-web` project on the PC. Find the PC's
-local IP address and copy the private value from its
-`database/reader_api.key` file.
+Start the separate `plate-access-control-web` project on the PC. That website
+uses native MySQL locally; the Pi never connects to MySQL. It sends recognition
+results only to the protected Flask API.
 
-On the Raspberry Pi:
+Find the PC's local IP address and copy the private value from the web project's
+`database/reader_api.key` file. On the Raspberry Pi, run:
 
 ```bash
-export PLATE_SERVER_URL=http://192.168.1.100:8080
-export PLATE_API_KEY=PASTE_THE_PRIVATE_KEY_HERE
-
-./build-pi/plate_reader --camera 0 \
-  models/license_plate_detector.onnx \
-  models/en_PP-OCRv5_rec_mobile.onnx \
-  Output --headless
+./configure_reader.sh
 ```
 
-Replace `192.168.1.100` with the PC's address. Use another camera index if the
-USB camera is not index `0`.
+Enter the complete PC website address, such as `http://192.168.0.103:8080`, the
+reader API key, and the USB camera index. The configuration is stored in a
+private `.env` file that Git ignores. The setup checks the website health route
+before accepting the configuration.
+
+Start the reader with:
+
+```bash
+./start_reader.sh
+```
+
+The launcher checks the PC website before opening the camera. The API key stays
+in the environment and is not placed in the command line or process listing.
+
+To test only the PC connection without opening the camera:
+
+```bash
+./start_reader.sh --check
+```
 
 At the prompt, enter:
 
@@ -56,19 +68,20 @@ capture
 The terminal prints the five-frame detection/OCR stages, the final plate, and
 the web server response. `status`, `help`, and `quit` remain available.
 
-The server address and key can also be supplied as command-line options:
+For temporary maintenance, the server address and key can still be supplied as
+environment variables:
 
 ```bash
+PLATE_SERVER_URL=http://192.168.0.103:8080 \
+PLATE_API_KEY=PASTE_THE_PRIVATE_KEY_HERE \
 ./build-pi/plate_reader --camera 0 \
   models/license_plate_detector.onnx \
   models/en_PP-OCRv5_rec_mobile.onnx \
-  Output --headless \
-  --server-url http://192.168.1.100:8080 \
-  --api-key PASTE_THE_PRIVATE_KEY_HERE
+  Output --headless
 ```
 
-Environment variables are preferred because they keep the secret out of shell
-history and process listings.
+The interactive configuration script is preferred because it prevents the key
+from being recorded in shell history.
 
 ## macOS build
 
@@ -78,8 +91,8 @@ cmake -S . -B build -DPLATE_ENABLE_CAMERA=ON
 cmake --build build -j
 ```
 
-Use the same command as above with `./build/plate_reader`. macOS camera access
-must be allowed for Terminal.
+Run `./configure_reader.sh`, followed by `./start_reader.sh`. The launcher
+automatically chooses the macOS build. Camera access must be allowed for Terminal.
 
 ## Process an image folder
 

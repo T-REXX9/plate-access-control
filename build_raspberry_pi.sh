@@ -13,7 +13,7 @@ case "$architecture" in
 esac
 
 sudo apt update
-sudo apt install -y build-essential cmake pkg-config libopencv-dev libcurl4-openssl-dev
+sudo apt install -y build-essential cmake pkg-config libopencv-dev libcurl4-openssl-dev curl
 
 cmake \
     -S "$project_dir" \
@@ -28,4 +28,5 @@ cmake --build "$project_dir/build-pi" --parallel 2
 echo
 echo "Build complete. Run:"
 echo "cd \"$project_dir\""
-echo "PLATE_SERVER_URL=http://PC_IP:8080 PLATE_API_KEY=YOUR_KEY ./build-pi/plate_reader --camera 0 models/license_plate_detector.onnx models/en_PP-OCRv5_rec_mobile.onnx Output --headless"
+echo "./configure_reader.sh"
+echo "./start_reader.sh"
