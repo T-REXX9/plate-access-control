@@ -733,7 +733,12 @@ bool reportRemoteCommand(
     const std::string& apiKey,
     long commandId,
     bool success,
-    const std::string& message
+    const std::string& message,
+    long long framesMilliseconds = -1,
+    long long yoloMilliseconds = -1,
+    long long ocrMilliseconds = -1,
+    long long serverMilliseconds = -1,
+    long long totalMilliseconds = -1
 ) {
     if (commandId <= 0) {
         return true;
@@ -755,6 +760,23 @@ bool reportRemoteCommand(
     part = curl_mime_addpart(form);
     curl_mime_name(part, "message");
     curl_mime_data(part, message.c_str(), CURL_ZERO_TERMINATED);
+    const auto addTiming = [&form](
+        const char* name,
+        long long value
+    ) {
+        if (value < 0) {
+            return;
+        }
+        curl_mimepart* timingPart = curl_mime_addpart(form);
+        curl_mime_name(timingPart, name);
+        const std::string valueText = std::to_string(value);
+        curl_mime_data(timingPart, valueText.c_str(), CURL_ZERO_TERMINATED);
+    };
+    addTiming("frames_ms", framesMilliseconds);
+    addTiming("yolo_ms", yoloMilliseconds);
+    addTiming("ocr_ms", ocrMilliseconds);
+    addTiming("server_ms", serverMilliseconds);
+    addTiming("total_ms", totalMilliseconds);
 
     std::string responseBody;
     curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
@@ -922,6 +944,9 @@ int runCamera(
 
         ++captureNumber;
         const auto startedAt = std::chrono::steady_clock::now();
+        const auto millisecondsBetween = [](const auto& beginning, const auto& end) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(end - beginning).count();
+        };
         constexpr int burstFrameCount = 5;
         constexpr int ocrCandidateCount = 3;
         std::cout << "CAPTURE " << captureNumber << ": acquiring "
@@ -942,20 +967,31 @@ int runCamera(
             }
         }
         if (frames.empty()) {
+            const auto failedAt = std::chrono::steady_clock::now();
             std::cerr << "CAPTURE " << captureNumber
                       << ": camera burst could not be read.\n";
+            std::cerr << "CAPTURE " << captureNumber << " TIMING: frames="
+                      << millisecondsBetween(startedAt, failedAt)
+                      << " ms, total=" << millisecondsBetween(startedAt, failedAt)
+                      << " ms.\n";
             reportRemoteCommand(
                 serverUrl,
                 apiKey,
                 activeCommandId,
                 false,
-                "Camera burst could not be read"
+                "Camera burst could not be read",
+                millisecondsBetween(startedAt, failedAt),
+                0,
+                0,
+                0,
+                millisecondsBetween(startedAt, failedAt)
             );
             continue;
         }
         std::cout << "CAPTURE " << captureNumber << ": captured "
                   << frames.size() << '/' << burstFrameCount
                   << " frames; running YOLO on the burst...\n";
+        const auto framesCapturedAt = std::chrono::steady_clock::now();
         const std::string captureStem = fs::path(
             eventSnapshotName("CAPTURE", captureNumber)
         ).stem().string();
@@ -996,13 +1032,17 @@ int runCamera(
                 candidates.push_back(std::move(bestFrameCandidate));
             }
         }
+        const auto yoloFinishedAt = std::chrono::steady_clock::now();
 
         if (candidates.empty()) {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startedAt
-            ).count();
+            const auto completedAt = std::chrono::steady_clock::now();
+            const auto elapsed = millisecondsBetween(startedAt, completedAt);
             std::cout << "CAPTURE " << captureNumber
                       << ": NO PLATE DETECTED IN ANY BURST FRAME.\n";
+            std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
+                      << millisecondsBetween(startedAt, framesCapturedAt)
+                      << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
+                      << " ms, OCR=0 ms, server=0 ms, total=" << elapsed << " ms.\n";
             std::cout << "CAPTURE " << captureNumber << ": complete in "
                       << elapsed << " ms; returning to IDLE.\n";
             reportRemoteCommand(
@@ -1010,7 +1050,12 @@ int runCamera(
                 apiKey,
                 activeCommandId,
                 true,
-                "No plate detected"
+                "No plate detected",
+                millisecondsBetween(startedAt, framesCapturedAt),
+                millisecondsBetween(framesCapturedAt, yoloFinishedAt),
+                0,
+                0,
+                elapsed
             );
             continue;
         }
@@ -1027,6 +1072,7 @@ int runCamera(
 
         std::vector<OcrVote> votes;
         votes.reserve(candidates.size());
+        const auto ocrStartedAt = std::chrono::steady_clock::now();
         for (std::size_t index = 0; index < candidates.size(); ++index) {
             const BurstCandidate& candidate = candidates[index];
             const std::string reading = readPlate(recognizer, candidate.enhancedCrop);
@@ -1063,25 +1109,23 @@ int runCamera(
             winner.enhancedCrop,
             {cv::IMWRITE_JPEG_QUALITY, 95}
         );
+        const auto ocrFinishedAt = std::chrono::steady_clock::now();
 
         cv::Scalar color(0, 200, 255);
         drawLabel(annotatedFrame, winner.detection.box, plate, color);
         std::cout << "CAPTURE " << captureNumber << ": CONSENSUS " << plate
                   << " from " << votes.size() << " OCR sample(s).\n";
 
+        long long serverMilliseconds = 0;
+        bool serverSent = false;
+        std::string serverResultMessage = "OCR returned unreadable";
         if (plate == "UNREADABLE") {
             std::cout << "UNREADABLE - plate regions were detected but the OCR burst "
                       << "returned no value.\n";
-            reportRemoteCommand(
-                serverUrl,
-                apiKey,
-                activeCommandId,
-                true,
-                "OCR returned unreadable"
-            );
         } else {
             std::string serverResponse;
-            const bool sent = sendRecognition(
+            const auto serverStartedAt = std::chrono::steady_clock::now();
+            serverSent = sendRecognition(
                 serverUrl,
                 apiKey,
                 plate,
@@ -1090,18 +1134,17 @@ int runCamera(
                 activeCommandId,
                 serverResponse
             );
-            if (sent) {
+            serverMilliseconds = millisecondsBetween(
+                serverStartedAt,
+                std::chrono::steady_clock::now()
+            );
+            if (serverSent) {
                 std::cout << "SERVER ACCEPTED " << plate << ' ' << serverResponse << '\n';
+                serverResultMessage = "Recognized " + plate;
             } else {
                 std::cerr << "SERVER SEND FAILED " << plate << ": "
                           << serverResponse << '\n';
-                reportRemoteCommand(
-                    serverUrl,
-                    apiKey,
-                    activeCommandId,
-                    false,
-                    "Recognition upload failed: " + serverResponse
-                );
+                serverResultMessage = "Recognition upload failed: " + serverResponse;
             }
         }
 
@@ -1109,11 +1152,28 @@ int runCamera(
             cv::imshow("On-demand License Plate Recognition", annotatedFrame);
             cv::waitKey(1);
         }
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startedAt
-        ).count();
+        const auto completedAt = std::chrono::steady_clock::now();
+        const auto elapsed = millisecondsBetween(startedAt, completedAt);
+        std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
+                  << millisecondsBetween(startedAt, framesCapturedAt)
+                  << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
+                  << " ms, OCR=" << millisecondsBetween(ocrStartedAt, ocrFinishedAt)
+                  << " ms, server=" << serverMilliseconds
+                  << " ms, total=" << elapsed << " ms.\n";
         std::cout << "CAPTURE " << captureNumber << ": complete in "
                   << elapsed << " ms; burst frames discarded, returning to IDLE.\n";
+        reportRemoteCommand(
+            serverUrl,
+            apiKey,
+            activeCommandId,
+            plate == "UNREADABLE" || serverSent,
+            serverResultMessage,
+            millisecondsBetween(startedAt, framesCapturedAt),
+            millisecondsBetween(framesCapturedAt, yoloFinishedAt),
+            millisecondsBetween(ocrStartedAt, ocrFinishedAt),
+            serverMilliseconds,
+            elapsed
+        );
     }
 
     camera.release();

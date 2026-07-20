@@ -62,7 +62,8 @@ To test only the PC connection without opening the camera:
 ```
 
 Press **Capture plate** on the administrator dashboard. The Pi terminal prints
-the five-frame detection/OCR stages, final plate, and web server response.
+the five-frame detection/OCR stages, final plate, web server response, and a
+timing summary for frame capture, YOLO, OCR, upload, and total processing time.
 
 For temporary maintenance, the server address and key can still be supplied as
 environment variables:
