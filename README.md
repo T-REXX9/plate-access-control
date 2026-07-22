@@ -9,12 +9,33 @@ the separate PC web server and does not host a website or database.
 
 1. Keep the camera open while YOLO and OCR remain idle.
 2. Wait for an administrator to press **Capture plate** on the PC dashboard.
-3. Acquire five fresh frames in memory for that queued request.
-4. Run YOLO on all five frames and rank the best plate regions.
-5. Run PP-OCRv5 on the best three enhanced crops.
-6. Choose the final clean alphanumeric plate using OCR consensus.
+3. Acquire one fresh frame in memory for that queued request.
+4. Run YOLO once and select the strongest plate region in that frame.
+5. Run PP-OCRv5 on the enhanced crop.
+6. Return the final clean alphanumeric plate value.
 7. Store only the winning enhanced crop in `Output/Plate-Crops`.
 8. Send the plate, detector confidence, and crop to the PC server.
+
+## Boom-barrier control development
+
+The safety state machine and macOS/Raspberry Pi simulator are now included.
+They implement the cycle lock, authorization/denial paths, open/close limit
+timeouts, passage clearance, obstruction reopening, waiting-vehicle behavior,
+and fail-safe red/green light outputs.
+
+Build and run the simulator:
+
+```bash
+cmake -S . -B build -DPLATE_ENABLE_CAMERA=ON -DBUILD_TESTING=ON
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
+./build/gate_simulator
+```
+
+The proposed isolated hardware connections and GPIO reservation are documented
+in [`docs/GATE_WIRING_DIAGRAM.md`](docs/GATE_WIRING_DIAGRAM.md). Physical GPIO
+movement outputs remain disabled until the exact barrier, sensors, and relay
+interfaces are confirmed.
 
 ## Raspberry Pi 4 setup
 
@@ -62,7 +83,7 @@ To test only the PC connection without opening the camera:
 ```
 
 Press **Capture plate** on the administrator dashboard. The Pi terminal prints
-the five-frame detection/OCR stages, final plate, web server response, and a
+the single-frame detection/OCR stages, final plate, web server response, and a
 timing summary for frame capture, YOLO, OCR, upload, and total processing time.
 
 For temporary maintenance, the server address and key can still be supplied as

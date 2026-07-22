@@ -925,7 +925,7 @@ int runCamera(
         }
         if (command == "help") {
             std::cout
-                << "capture  Grab five fresh frames and run quality-ranked YOLO/OCR consensus.\n"
+                << "capture  Grab one fresh frame and run YOLO/OCR on its best plate crop.\n"
                 << "status   Show whether the camera and models are idle.\n"
                 << "quit     Release the camera and stop the reader.\n";
             continue;
@@ -947,10 +947,10 @@ int runCamera(
         const auto millisecondsBetween = [](const auto& beginning, const auto& end) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(end - beginning).count();
         };
-        constexpr int burstFrameCount = 5;
-        constexpr int ocrCandidateCount = 3;
+        constexpr int captureFrameCount = 1;
+        constexpr int ocrCandidateCount = 1;
         std::cout << "CAPTURE " << captureNumber << ": acquiring "
-                  << burstFrameCount << " fresh camera frames...\n";
+                  << captureFrameCount << " fresh camera frame...\n";
 
         // A camera that remains open while idle may have queued old frames.
         // Flush those buffers, then retain only a short in-memory burst.
@@ -959,8 +959,8 @@ int runCamera(
             camera.read(discardedFrame);
         }
         std::vector<cv::Mat> frames;
-        frames.reserve(burstFrameCount);
-        for (int index = 0; index < burstFrameCount; ++index) {
+        frames.reserve(captureFrameCount);
+        for (int index = 0; index < captureFrameCount; ++index) {
             cv::Mat frame;
             if (camera.read(frame) && !frame.empty()) {
                 frames.push_back(frame.clone());
@@ -989,8 +989,8 @@ int runCamera(
             continue;
         }
         std::cout << "CAPTURE " << captureNumber << ": captured "
-                  << frames.size() << '/' << burstFrameCount
-                  << " frames; running YOLO on the burst...\n";
+                  << frames.size() << '/' << captureFrameCount
+                  << " frame; running YOLO...\n";
         const auto framesCapturedAt = std::chrono::steady_clock::now();
         const std::string captureStem = fs::path(
             eventSnapshotName("CAPTURE", captureNumber)
@@ -1038,7 +1038,7 @@ int runCamera(
             const auto completedAt = std::chrono::steady_clock::now();
             const auto elapsed = millisecondsBetween(startedAt, completedAt);
             std::cout << "CAPTURE " << captureNumber
-                      << ": NO PLATE DETECTED IN ANY BURST FRAME.\n";
+                      << ": NO PLATE DETECTED IN THE CAPTURED FRAME.\n";
             std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
                       << millisecondsBetween(startedAt, framesCapturedAt)
                       << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
@@ -1161,7 +1161,7 @@ int runCamera(
                   << " ms, server=" << serverMilliseconds
                   << " ms, total=" << elapsed << " ms.\n";
         std::cout << "CAPTURE " << captureNumber << ": complete in "
-                  << elapsed << " ms; burst frames discarded, returning to IDLE.\n";
+                  << elapsed << " ms; captured frame discarded, returning to IDLE.\n";
         reportRemoteCommand(
             serverUrl,
             apiKey,

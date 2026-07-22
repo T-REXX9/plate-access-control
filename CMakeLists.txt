@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(plate_reader_cpp LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -23,6 +25,18 @@ if(PLATE_ENABLE_CAMERA)
     find_package(CURL REQUIRED)
     target_compile_definitions(plate_reader PRIVATE PLATE_ENABLE_CAMERA=1)
     target_link_libraries(plate_reader PRIVATE CURL::libcurl)
+endif()
+
+add_library(gate_control src/gate_controller.cpp)
+target_include_directories(gate_control PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_executable(gate_simulator src/gate_simulator.cpp)
+target_link_libraries(gate_simulator PRIVATE gate_control)
+
+if(BUILD_TESTING)
+    add_executable(gate_controller_tests tests/gate_controller_tests.cpp)
+    target_link_libraries(gate_controller_tests PRIVATE gate_control)
+    add_test(NAME gate_controller_safety COMMAND gate_controller_tests)
 endif()
 
 if(PLATE_RASPBERRY_PI AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

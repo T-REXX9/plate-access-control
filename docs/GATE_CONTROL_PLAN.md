@@ -1,11 +1,19 @@
 # Boom Barrier Gate-Control Plan
 
+## Implementation status
+
+The hardware-independent C++ `GateController`, interactive simulator, GPIO
+reservation, isolated wiring diagram, and automated safety tests are now
+implemented. Physical GPIO movement remains disabled until the exact boom
+controller, sensors, relay modules, signal voltages, and active polarities are
+confirmed. Recognition and website status integration are the next phase.
+
 ## Objective
 
 Extend the existing C++ plate reader so the Raspberry Pi safely coordinates:
 
 - An inductive-loop vehicle-presence sensor
-- Five-frame YOLO and OCR plate recognition
+- Single-frame YOLO and OCR plate recognition
 - Remote PC API vehicle authorization
 - A boom barrier controller
 - An IR or photoelectric passage-safety sensor
@@ -49,7 +57,7 @@ manufacturer's instructions and applicable local requirements.
    debounce period.
 5. The controller locks the gate cycle so no second recognition cycle can
    overlap it.
-6. The camera captures five fresh frames.
+6. The camera captures one fresh frame.
 7. YOLO detects the plate, the best crops are enhanced, and OCR consensus
    produces a clean uppercase alphanumeric value.
 8. The recognition result is sent to the PC API, which checks for an active registered vehicle.
@@ -170,7 +178,7 @@ The current plate-reader executable will be extended with testable components:
 
 ```text
 plate_reader
-├── camera and five-frame capture
+├── camera and single-frame capture
 ├── YOLO detection and crop enhancement
 ├── OCR consensus
 ├── Authenticated PC API client
@@ -213,8 +221,8 @@ settings will prevent automatic operation.
 - Failure defaults to denied access.
 - Plate formatting remains country-neutral: uppercase letters and numbers only.
 - A denied vehicle must clear the loop before it can trigger another attempt.
-- The existing five-frame burst and OCR consensus remain the recognition
-  pipeline unless separately changed and tested.
+- The single-frame YOLO and OCR pipeline remains the recognition pipeline
+  unless separately changed and tested.
 
 ## Database changes
 
@@ -298,7 +306,7 @@ Fault recovery requires a healthy sensor state and explicit acknowledgement.
 ### Phase 4: Recognition integration
 
 - Replace direct loop-to-capture behavior with a state-machine event
-- Run the existing five-frame recognition pipeline only in `RECOGNIZING`
+- Run the single-frame recognition pipeline only in `RECOGNIZING`
 - Connect the PC API authorization response to `OPENING` or `DENIED`
 - Prevent repeated attempts while a denied vehicle remains on the loop
 

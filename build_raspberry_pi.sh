@@ -24,9 +24,13 @@ cmake \
 # Two compiler jobs avoid memory pressure on a 4 GB Raspberry Pi while still
 # using more than one core.
 cmake --build "$project_dir/build-pi" --parallel 2
+ctest --test-dir "$project_dir/build-pi" --output-on-failure
 
 echo
 echo "Build complete. Run:"
 echo "cd \"$project_dir\""
 echo "./configure_reader.sh"
 echo "./start_reader.sh"
+echo
+echo "Gate safety simulator: ./build-pi/gate_simulator"
+echo "Wiring guide: docs/GATE_WIRING_DIAGRAM.md"
