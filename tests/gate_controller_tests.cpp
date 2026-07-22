@@ -42,11 +42,15 @@ void authorizedCycleAndWaitingVehicle() {
     require(fixture.controller.recognitionCompleted(fixture.now, true), "authorization is accepted");
     auto status = fixture.update();
     require(status.state == State::Opening && status.outputs.requestOpen, "authorized cycle pulses open");
-    require(status.outputs.greenLight && !status.outputs.redLight, "authorized movement shows green");
+    require(status.outputs.trafficGreen, "authorized movement shows green");
 
-    fixture.inputs.fullyClosed = false;
-    fixture.inputs.fullyOpen = true;
-    require(fixture.update().state == State::GateOpen, "open limit confirms gate open");
+    status = fixture.update(999);
+    require(status.outputs.requestOpen, "open pulse remains high before one second");
+    status = fixture.update(1);
+    require(!status.outputs.requestOpen, "open pulse returns low after one second");
+
+    require(fixture.update(fixture.config.openingTravelTime.count() - 1000).state == State::GateOpen,
+            "opening travel delay completes");
     fixture.inputs.loopPresent = true;
     fixture.update(1000);
     require(fixture.controller.state() == State::GateOpen, "second loop activity cannot overlap cycle");
@@ -57,11 +61,12 @@ void authorizedCycleAndWaitingVehicle() {
     require(fixture.update().state == State::ClearanceWait, "clear passage starts clearance timer");
     status = fixture.update(fixture.config.clearanceTime.count());
     require(status.state == State::Closing && status.outputs.requestClose, "clearance requests closing");
-    require(status.outputs.redLight && !status.outputs.greenLight, "closing shows red");
+    require(!status.outputs.trafficGreen, "closing shows red");
 
-    fixture.inputs.fullyOpen = false;
-    fixture.inputs.fullyClosed = true;
-    require(fixture.update().state == State::Rearming, "closed limit ends movement cycle");
+    status = fixture.update(1000);
+    require(!status.outputs.requestClose, "close pulse returns low after one second");
+    require(fixture.update(fixture.config.closingTravelTime.count() - 1000).state == State::Rearming,
+            "closing travel delay ends movement cycle");
     fixture.update();
     fixture.update(fixture.config.inputDebounce.count());
     require(fixture.controller.state() == State::Recognizing, "waiting vehicle starts after confirmed closure");
@@ -72,7 +77,11 @@ void denialRequiresLoopClear() {
     fixture.update();
     fixture.startRecognition();
     fixture.controller.recognitionCompleted(fixture.now, false);
-    require(fixture.update().state == State::Denied, "denied plate keeps gate denied");
+    const auto denied = fixture.update();
+    require(denied.state == State::Denied, "denied plate keeps gate denied");
+    require(!denied.outputs.trafficGreen && !denied.outputs.requestOpen &&
+            !denied.outputs.requestClose,
+            "denied plate remains red and never pulses movement outputs");
     fixture.update(5000);
     require(fixture.controller.state() == State::Denied, "occupied loop cannot retrigger denied vehicle");
     fixture.inputs.loopPresent = false;
@@ -86,15 +95,12 @@ void obstructionReopensAndBlocksCloseRelay() {
     fixture.update();
     fixture.startRecognition();
     fixture.controller.recognitionCompleted(fixture.now, true);
-    fixture.inputs.fullyClosed = false;
-    fixture.inputs.fullyOpen = true;
-    fixture.update();
+    fixture.update(fixture.config.openingTravelTime.count());
     fixture.inputs.passageBlocked = true;
     fixture.update();
     fixture.inputs.passageBlocked = false;
     fixture.update();
     fixture.update(fixture.config.clearanceTime.count());
-    fixture.inputs.fullyOpen = false;
     fixture.inputs.passageBlocked = true;
     const auto status = fixture.update();
     require(status.state == State::Opening, "obstruction during closing requests reopen");
@@ -104,21 +110,23 @@ void obstructionReopensAndBlocksCloseRelay() {
 
 void faultsAreFailSafe() {
     Fixture fixture;
-    fixture.inputs.fullyOpen = true;
-    const auto startupFault = fixture.update();
-    require(startupFault.state == State::Fault, "contradictory limits fault at startup");
-    require(startupFault.outputs.redLight && !startupFault.outputs.greenLight,
-            "fault defaults to red light");
-    require(!startupFault.outputs.requestOpen && !startupFault.outputs.requestClose,
+    fixture.update();
+    fixture.startRecognition();
+    fixture.update(fixture.config.recognitionTimeout.count());
+    const auto fault = fixture.update();
+    require(fault.state == State::Fault, "recognition timeout enters fault");
+    require(!fault.outputs.trafficGreen, "fault defaults to red");
+    require(!fault.outputs.requestOpen && !fault.outputs.requestClose,
             "fault removes movement requests");
 
-    Fixture timeout;
-    timeout.update();
-    timeout.startRecognition();
-    timeout.controller.recognitionCompleted(timeout.now, true);
-    timeout.inputs.fullyClosed = false;
-    timeout.update(timeout.config.openingTimeout.count());
-    require(timeout.controller.state() == State::Fault, "opening timeout enters fault");
+    Fixture passageTimeout;
+    passageTimeout.update();
+    passageTimeout.startRecognition();
+    passageTimeout.controller.recognitionCompleted(passageTimeout.now, true);
+    passageTimeout.update(passageTimeout.config.openingTravelTime.count());
+    passageTimeout.update(passageTimeout.config.passageTimeout.count());
+    require(passageTimeout.controller.state() == State::Fault,
+            "missing IR passage enters fault instead of closing blindly");
 }
 
 }  // namespace

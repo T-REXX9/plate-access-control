@@ -1,132 +1,92 @@
-# Raspberry Pi Boom-Barrier Wiring Diagram
+# Simplified Raspberry Pi Gate Wiring
 
-## Safety scope
+## GPIO behavior
 
-The Raspberry Pi controls only isolated, low-voltage control contacts. It must
-never power the boom motor, traffic lamps, loop, or safety sensor directly.
+The two switches connect their GPIO input directly to Raspberry Pi ground when
+active. The program enables the GPIO's internal pull-up resistor.
 
-The passage photoelectric/IR sensor must operate the boom controller's hardware
-`SAFETY`, `PHOTO`, or `CLOSE INTERRUPT` input even if the Raspberry Pi is off.
-The Pi receives a separate isolated copy of that signal for sequencing. Use a
-sensor with two independent contacts or an approved interposing relay; do not
-join unrelated controller and Pi circuits together.
+- Switch open: input reads HIGH and is inactive.
+- Switch closed to GND: input reads LOW and is active.
+- Traffic output LOW: red.
+- Traffic output HIGH: green.
+- Open and close outputs: normally LOW; the selected output goes HIGH for
+  exactly one second and then returns LOW.
+- Open and close are never driven HIGH together.
 
-Do not connect 5 V, 12 V, or 24 V field signals to a Raspberry Pi GPIO pin.
-Use 3.3 V-compatible opto-isolated digital-input modules and dry-contact relay
-outputs. A qualified gate installer or controls electrician must confirm the
-final terminals, voltages, fusing, earthing, and enclosure.
-
-## System wiring
+## Wiring diagram
 
 ```mermaid
 flowchart LR
-    subgraph FIELD["Gate field devices — typically 12/24 V"]
-        LOOP["Inductive loop detector\nvehicle-present relay"]
-        IR["IR / photoelectric safety sensor"]
-        OPENLS["Boom open-limit contact"]
-        CLOSELS["Boom closed-limit contact"]
-        FAULT["Barrier fault contact (optional)"]
-        RED["Red traffic lamp"]
-        GREEN["Green traffic lamp"]
+    subgraph PI["Raspberry Pi 4 — 40-pin header"]
+        GND["GND\nphysical pin 6"]
+        LOOP["BCM17 / physical pin 11\ninductive-loop input\ninternal pull-up"]
+        IR["BCM27 / physical pin 13\nIR-beam input\ninternal pull-up"]
+        TRAFFIC["BCM22 / physical pin 15\nLOW red · HIGH green"]
+        OPEN["BCM23 / physical pin 16\nOPEN pulse HIGH 1 second"]
+        CLOSE["BCM24 / physical pin 18\nCLOSE pulse HIGH 1 second"]
     end
 
-    subgraph ISOLATION["DIN-rail isolated interface"]
-        DI["5-channel 3.3 V opto-isolated\ndigital-input interface"]
-        K1["K1 dry contact\nOPEN request"]
-        K2["K2 dry contact\nCLOSE request"]
-        K3["K3 relay / contactor\nRED lamp"]
-        K4["K4 relay / contactor\nGREEN lamp"]
-        AUX["Dual-pole safety relay or\nsecond sensor contact"]
-    end
+    LOOPSW["Inductive-loop toggle\nON = vehicle present"]
+    IRSW["IR-beam toggle\nON = beam broken"]
+    LIGHT["3.3 V-compatible\nred/green selector input"]
+    OPENIN["3.3 V-compatible\nbarrier OPEN input"]
+    CLOSEIN["3.3 V-compatible\nbarrier CLOSE input"]
 
-    subgraph PI["Raspberry Pi 4 — 3.3 V GPIO only"]
-        IN["GPIO inputs\n17 loop · 27 passage · 22 open\n23 closed · 24 fault"]
-        OUT["GPIO outputs\n5 open · 6 close · 13 red · 19 green"]
-        APP["C++ GateController\ncycle lock + safety state machine"]
-        IN --> APP --> OUT
-    end
-
-    subgraph BARRIER["Commercial boom controller"]
-        SAFETY["Dedicated safety / close-interrupt input"]
-        OPENIN["OPEN / START input"]
-        CLOSEIN["CLOSE input"]
-        MOTOR["Internal motor controls"]
-        SAFETY --> MOTOR
-        OPENIN --> MOTOR
-        CLOSEIN --> MOTOR
-    end
-
-    LOOP --> DI
-    OPENLS --> DI
-    CLOSELS --> DI
-    FAULT --> DI
-    IR --> AUX
-    AUX --> SAFETY
-    AUX --> DI
-    DI --> IN
-
-    OUT --> K1 --> OPENIN
-    OUT --> K2 --> CLOSEIN
-    OUT --> K3 --> RED
-    OUT --> K4 --> GREEN
+    LOOP --- LOOPSW --- GND
+    IR --- IRSW --- GND
+    TRAFFIC --> LIGHT
+    OPEN --> OPENIN
+    CLOSE --> CLOSEIN
 ```
 
-## Proposed Raspberry Pi GPIO assignment
+## Pin table
 
-These lines are reserved in `config/gate.env.example`. They are not enabled by
-default and can be changed before the physical backend is commissioned.
+Use BCM numbers in software. Physical pin numbers refer to the Raspberry Pi
+40-pin header.
 
-| Signal | BCM GPIO | Header pin | Direction | Interface | Safe state |
-| --- | ---: | ---: | --- | --- | --- |
-| Vehicle loop occupied | 17 | 11 | Input | Isolated DI channel 1 | Clear |
-| Passage blocked | 27 | 13 | Input | Isolated DI channel 2 | Treat disconnect as blocked |
-| Boom fully open | 22 | 15 | Input | Isolated DI channel 3 | Inactive |
-| Boom fully closed | 23 | 16 | Input | Isolated DI channel 4 | Must be active before automatic mode |
-| Barrier fault | 24 | 18 | Input | Isolated DI channel 5 | Treat disconnect as fault |
-| Open request K1 | 5 | 29 | Output | Opto-isolated dry-contact relay | Relay off |
-| Close request K2 | 6 | 31 | Output | Opto-isolated dry-contact relay | Relay off |
-| Red lamp K3 | 13 | 33 | Output | Relay/contactor sized for lamp | On |
-| Green lamp K4 | 19 | 35 | Output | Relay/contactor sized for lamp | Off |
+| Function | BCM GPIO | Physical pin | Electrical behavior |
+| --- | ---: | ---: | --- |
+| Inductive-loop toggle | 17 | 11 | Short to GND means vehicle present |
+| IR-beam toggle | 27 | 13 | Short to GND means vehicle under barrier |
+| Traffic red/green selector | 22 | 15 | LOW red, HIGH green |
+| Barrier open command | 23 | 16 | HIGH for one second |
+| Barrier close command | 24 | 18 | HIGH for one second |
+| Switch return/common | — | 6 | Raspberry Pi GND |
 
-Use a Pi ground pin only on the Pi side of an isolation module. Keep the field
-power-supply negative isolated unless the interface manufacturer's wiring
-instructions explicitly require a common reference.
+Other ground pins such as physical pins 9, 14, 20, 25, 30, 34, or 39 may also
+be used.
 
-## Contact-side connections
+## Toggle-switch connections
 
-1. Connect K1 `COM` and `NO` across the boom controller's low-voltage `COM` and
-   `OPEN` terminals.
-2. Connect K2 `COM` and `NO` across `COM` and `CLOSE` only if the controller has
-   a dedicated close input. Some barriers provide only a step/start input; that
-   requires model-specific logic and must not be guessed.
-3. Connect the IR sensor directly to the controller's monitored safety input.
-   Use a second pole/contact for the Pi passage input.
-4. Connect physical open- and closed-limit feedback contacts to isolated input
-   channels. Timing is not accepted as proof of boom position.
-5. Power the lamps from their rated, fused supply through K3/K4 contacts. For
-   mains-powered lamps, use appropriately rated contactors inside a protected
-   enclosure and have an electrician complete the mains wiring.
+For each input toggle:
 
-## Startup and shutdown behavior
+```text
+BCM GPIO input ---- toggle switch ---- Raspberry Pi GND
+```
 
-- Both movement relays are off before GPIO initialization and after shutdown.
-- Red is on and green is off during startup, denial, closing, and faults.
-- Automatic operation starts only when the closed limit is confirmed, the open
-  limit is inactive, the safety path is clear, and no barrier fault is active.
-- Simultaneous open and closed limits force a fault.
-- A blocked passage input can never produce a software close request.
-- The commercial controller's safety input remains the primary, immediate
-  stop/reopen protection.
+Do not connect either input switch to 3.3 V or 5 V. The internal pull-up already
+provides the inactive HIGH state.
 
-## Information still required before enabling GPIO
+## Output requirements
 
-- Boom barrier manufacturer and exact model
-- Controller terminal/wiring manual
-- Inductive-loop detector model and output contact rating
-- IR/photoelectric sensor model and safety-output behavior
-- Open/closed/fault feedback voltage or contact specification
-- Isolation/relay module model and whether its logic is active-high or active-low
-- Traffic-light voltage and current
+The three outputs are Raspberry Pi 3.3 V logic signals only. They are not
+5 V-tolerant and cannot accept or switch 12/24 V directly.
 
-The final pin polarity and contact wiring must be entered only after those
-details are confirmed with a meter and the manufacturer documentation.
+If the traffic controller or barrier inputs are not explicitly compatible with
+3.3 V logic, connect each GPIO through an opto-isolator, transistor interface,
+or appropriate relay module. Never connect a higher-voltage barrier signal
+directly to the Pi.
+
+At program startup and shutdown, BCM22, BCM23, and BCM24 are driven LOW. This
+selects red and prevents accidental open or close commands.
+
+## Enable automatic gate mode
+
+After wiring and testing the pins, set this in the controller's private `.env`:
+
+```text
+GATE_MODE=1
+```
+
+The remaining optional values and default pin assignments are listed in
+`config/gate.env.example`.

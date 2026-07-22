@@ -12,14 +12,32 @@ case "$architecture" in
         ;;
 esac
 
-sudo apt update
-sudo apt install -y build-essential cmake pkg-config libopencv-dev libcurl4-openssl-dev curl
+privilege=()
+if [[ $EUID -ne 0 ]]; then
+    privilege=(sudo)
+fi
+if [[ "${PLATE_SKIP_APT:-0}" != "1" ]]; then
+    "${privilege[@]}" apt update
+    "${privilege[@]}" apt install -y build-essential cmake pkg-config libcurl4-openssl-dev libgpiod-dev gpiod curl
+fi
+
+opencv_arguments=()
+for opencv_config in \
+    /opt/opencv-4.10.0/lib/cmake/opencv4/OpenCVConfig.cmake \
+    /usr/local/lib/cmake/opencv4/OpenCVConfig.cmake; do
+    if [[ -f "$opencv_config" ]]; then
+        opencv_arguments+=("-DOpenCV_DIR=$(dirname "$opencv_config")")
+        break
+    fi
+done
 
 cmake \
     -S "$project_dir" \
     -B "$project_dir/build-pi" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DPLATE_RASPBERRY_PI=ON
+    -DPLATE_RASPBERRY_PI=ON \
+    -DPLATE_ENABLE_GPIO=ON \
+    "${opencv_arguments[@]}"
 
 # Two compiler jobs avoid memory pressure on a 4 GB Raspberry Pi while still
 # using more than one core.

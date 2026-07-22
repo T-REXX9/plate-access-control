@@ -15,11 +15,18 @@ source "$config_path"
 set +a
 
 : "${PLATE_SERVER_URL:?PLATE_SERVER_URL is missing from .env}"
-: "${PLATE_API_KEY:?PLATE_API_KEY is missing from .env}"
 : "${CAMERA_INDEX:=0}"
+: "${GATE_MODE:=0}"
+: "${PLATE_OUTPUT_DIR:=$project_dir/Output}"
+
+if [[ "$GATE_MODE" != "0" && "$GATE_MODE" != "1" ]]; then
+    echo "GATE_MODE must be 0 or 1."
+    exit 1
+fi
 
 PLATE_SERVER_URL="${PLATE_SERVER_URL%/}"
-export PLATE_SERVER_URL PLATE_API_KEY CAMERA_INDEX
+export PLATE_SERVER_URL CAMERA_INDEX
+mkdir -p "$PLATE_OUTPUT_DIR"
 
 if ! curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
     "$PLATE_SERVER_URL/health" >/dev/null; then
@@ -44,8 +51,14 @@ fi
 
 cd "$project_dir"
 echo "PC website connected: $PLATE_SERVER_URL"
-echo "Starting camera $CAMERA_INDEX in idle mode; Capture requests come from the website."
+mode_argument="--remote-commands"
+if [[ "$GATE_MODE" == "1" ]]; then
+    mode_argument="--gate"
+    echo "Starting automatic gate mode on camera $CAMERA_INDEX."
+else
+    echo "Starting camera $CAMERA_INDEX in idle mode; Capture requests come from the website."
+fi
 exec "$reader" --camera "$CAMERA_INDEX" \
-    models/license_plate_detector.onnx \
-    models/en_PP-OCRv5_rec_mobile.onnx \
-    Output --headless --remote-commands
+  models/license_plate_detector.onnx \
+  models/en_PP-OCRv5_rec_mobile.onnx \
+  "$PLATE_OUTPUT_DIR" --headless "$mode_argument"

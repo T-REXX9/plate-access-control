@@ -14,8 +14,7 @@ void printSnapshot(const gate::Snapshot& snapshot, long long elapsedMs) {
         << " cycle=" << (snapshot.cycleActive ? "locked" : "free")
         << " open_relay=" << snapshot.outputs.requestOpen
         << " close_relay=" << snapshot.outputs.requestClose
-        << " red=" << snapshot.outputs.redLight
-        << " green=" << snapshot.outputs.greenLight;
+        << " traffic=" << (snapshot.outputs.trafficGreen ? "GREEN" : "RED");
     if (!snapshot.faultReason.empty()) {
         std::cout << " fault=\"" << snapshot.faultReason << '"';
     }
@@ -39,8 +38,7 @@ int main() {
     std::cout
         << "Gate simulator. Commands:\n"
         << "  loop on|off             passage blocked|clear\n"
-        << "  open-limit on|off       closed-limit on|off\n"
-        << "  barrier-fault on|off    authorize|deny|recognition-error\n"
+        << "  authorize|deny|recognition-error\n"
         << "  tick MILLISECONDS       reset|status|quit\n";
     printSnapshot(controller.update(now, inputs), 0);
 
@@ -67,12 +65,6 @@ int main() {
             inputs.loopPresent = onValue(value);
         } else if (name == "passage") {
             inputs.passageBlocked = onValue(value);
-        } else if (name == "open-limit") {
-            inputs.fullyOpen = onValue(value);
-        } else if (name == "closed-limit") {
-            inputs.fullyClosed = onValue(value);
-        } else if (name == "barrier-fault") {
-            inputs.barrierFault = onValue(value);
         } else if (name == "authorize") {
             if (!controller.recognitionCompleted(now, true)) {
                 std::cout << "authorize is valid only in RECOGNIZING.\n";
@@ -87,7 +79,7 @@ int main() {
             }
         } else if (name == "reset") {
             if (!controller.acknowledgeFault(now, inputs)) {
-                std::cout << "Reset rejected: closed limit, clear passage, and healthy fault input are required.\n";
+                std::cout << "Reset rejected: the IR passage input must be clear.\n";
             }
         } else if (name != "status") {
             std::cout << "Unknown command.\n";

@@ -25,27 +25,24 @@ enum class State {
 
 struct Config {
     Milliseconds inputDebounce{300};
-    Milliseconds relayPulse{500};
+    Milliseconds relayPulse{1000};
     Milliseconds recognitionTimeout{20000};
-    Milliseconds openingTimeout{12000};
+    Milliseconds openingTravelTime{3000};
     Milliseconds passageTimeout{30000};
     Milliseconds clearanceTime{1500};
-    Milliseconds closingTimeout{12000};
+    Milliseconds closingTravelTime{3000};
 };
 
 struct Inputs {
     bool loopPresent = false;
     bool passageBlocked = false;
-    bool fullyOpen = false;
-    bool fullyClosed = true;
-    bool barrierFault = false;
 };
 
 struct Outputs {
     bool requestOpen = false;
     bool requestClose = false;
-    bool redLight = true;
-    bool greenLight = false;
+    // LOW means red and HIGH means green on the single traffic selector pin.
+    bool trafficGreen = false;
 };
 
 struct Snapshot {

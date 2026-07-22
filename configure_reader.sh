@@ -2,32 +2,82 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-config_path="$project_dir/.env"
+config_path="${PLATE_READER_CONFIG:-$project_dir/.env}"
 
-read -r -p "PC website address (example http://192.168.0.103:8080): " server_url
+echo "Searching the local network for the plate-program server..."
+discovered_servers=()
+while IFS= read -r discovered_server; do
+    [[ -n "$discovered_server" ]] && discovered_servers+=("$discovered_server")
+done < <("$project_dir/discover_server.sh" 2>/dev/null || true)
+
+server_url=""
+if [[ ${#discovered_servers[@]} -eq 1 ]]; then
+    read -r -p "Found ${discovered_servers[0]}. Use this server? [Y/n]: " use_found
+    case "${use_found:-y}" in
+        n|N|no|NO) ;;
+        *) server_url="${discovered_servers[0]}" ;;
+    esac
+elif [[ ${#discovered_servers[@]} -gt 1 ]]; then
+    echo "Found these possible plate-program servers:"
+    for index in "${!discovered_servers[@]}"; do
+        printf '  %d) %s\n' "$((index + 1))" "${discovered_servers[$index]}"
+    done
+    read -r -p "Choose a number, or press Enter to type the address: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#discovered_servers[@]})); then
+        server_url="${discovered_servers[$((choice - 1))]}"
+    fi
+else
+    echo "No plate-program server was found automatically."
+fi
+
+if [[ -z "$server_url" ]]; then
+    read -r -p "PC website address (example http://192.168.0.103:8080): " server_url
+fi
 server_url="${server_url%/}"
-if [[ ! "$server_url" =~ ^https?://[^[:space:]]+$ ]]; then
+if [[ ! "$server_url" =~ ^https?://[A-Za-z0-9._:-]+$ ]]; then
     echo "Enter a complete http:// or https:// website address."
     exit 1
 fi
 
-read -r -s -p "Reader API key from the PC website: " api_key
-echo
-if [[ ${#api_key} -lt 32 ]]; then
-    echo "The reader API key is missing or too short."
-    exit 1
+if command -v v4l2-ctl >/dev/null 2>&1; then
+    echo
+    echo "Connected cameras:"
+    v4l2-ctl --list-devices 2>/dev/null || true
 fi
 
-read -r -p "USB camera index [0]: " camera_index
-camera_index="${camera_index:-0}"
-if [[ ! "$camera_index" =~ ^[0-9]+$ ]]; then
-    echo "Camera index must be zero or a positive number."
-    exit 1
-fi
+while true; do
+    read -r -p "USB camera index [0]: " camera_index
+    camera_index="${camera_index:-0}"
+    if [[ ! "$camera_index" =~ ^[0-9]+$ ]]; then
+        echo "Camera index must be zero or a positive number."
+        continue
+    fi
+    if [[ "$(uname -s)" == "Linux" && ! -e "/dev/video$camera_index" ]]; then
+        echo "/dev/video$camera_index does not exist. Connect the camera or choose another index."
+        continue
+    fi
+    break
+done
 
+read -r -p "Enable automatic GPIO gate mode? [y/N]: " gate_answer
+case "${gate_answer:-n}" in
+    y|Y|yes|YES)
+        read -r -p "Are the two switches and all three protected 3.3 V output interfaces wired? [y/N]: " wiring_answer
+        case "${wiring_answer:-n}" in
+            y|Y|yes|YES) gate_mode=1 ;;
+            *)
+                gate_mode=0
+                echo "Gate mode will remain safely disabled until the wiring is ready."
+                ;;
+        esac
+        ;;
+    *) gate_mode=0 ;;
+esac
+
+mkdir -p "$(dirname "$config_path")"
 umask 077
-printf 'PLATE_SERVER_URL=%s\nPLATE_API_KEY=%s\nCAMERA_INDEX=%s\n' \
-    "$server_url" "$api_key" "$camera_index" > "$config_path"
+printf 'PLATE_SERVER_URL=%s\nCAMERA_INDEX=%s\nGATE_MODE=%s\n' \
+    "$server_url" "$camera_index" "$gate_mode" > "$config_path"
 chmod 600 "$config_path"
 
 if curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \

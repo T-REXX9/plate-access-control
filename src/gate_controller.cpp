@@ -1,10 +1,19 @@
 #include "gate_controller.hpp"
 
+#include <stdexcept>
 #include <utility>
 
 namespace gate {
 
-Controller::Controller(Config config) : config_(std::move(config)) {}
+Controller::Controller(Config config) : config_(std::move(config)) {
+    if (config_.inputDebounce.count() < 0 || config_.relayPulse.count() <= 0 ||
+        config_.recognitionTimeout.count() <= 0 ||
+        config_.openingTravelTime < config_.relayPulse ||
+        config_.passageTimeout.count() <= 0 || config_.clearanceTime.count() < 0 ||
+        config_.closingTravelTime < config_.relayPulse) {
+        throw std::invalid_argument("Invalid gate timing configuration");
+    }
+}
 
 void Controller::transition(State next, TimePoint now) {
     state_ = next;
@@ -43,30 +52,14 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
         stateEnteredAt_ = now;
     }
 
-    if (state_ != State::Fault) {
-        if (inputs.fullyOpen && inputs.fullyClosed) {
-            enterFault("Open and closed limit inputs are active together", now);
-        } else if (inputs.barrierFault) {
-            enterFault("Barrier controller fault input is active", now);
-        }
-    }
-
     switch (state_) {
         case State::Startup:
-            if (inputs.passageBlocked) {
-                enterFault("Passage safety sensor is blocked at startup", now);
-            } else if (!inputs.fullyClosed || inputs.fullyOpen) {
-                enterFault("Barrier position is not confirmed closed at startup", now);
-            } else {
-                faultReason_.clear();
-                transition(State::IdleClosed, now);
-            }
+            faultReason_.clear();
+            transition(State::IdleClosed, now);
             break;
 
         case State::IdleClosed:
-            if (!inputs.fullyClosed) {
-                enterFault("Closed limit was lost while idle", now);
-            } else if (inputStableFor(
+            if (inputStableFor(
                 inputs.loopPresent,
                 now,
                 loopOccupiedSince_,
@@ -77,17 +70,13 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
             break;
 
         case State::Recognizing:
-            if (!inputs.fullyClosed) {
-                enterFault("Closed limit was lost during recognition", now);
-            } else if (now - stateEnteredAt_ >= config_.recognitionTimeout) {
+            if (now - stateEnteredAt_ >= config_.recognitionTimeout) {
                 enterFault("Plate recognition timed out", now);
             }
             break;
 
         case State::Denied:
-            if (!inputs.fullyClosed) {
-                enterFault("Closed limit was lost while access was denied", now);
-            } else if (inputStableFor(
+            if (inputStableFor(
                 !inputs.loopPresent,
                 now,
                 loopClearSince_,
@@ -98,17 +87,13 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
             break;
 
         case State::Opening:
-            if (inputs.fullyOpen) {
+            if (now - stateEnteredAt_ >= config_.openingTravelTime) {
                 transition(State::GateOpen, now);
-            } else if (now - stateEnteredAt_ >= config_.openingTimeout) {
-                enterFault("Barrier did not reach the open limit", now);
             }
             break;
 
         case State::GateOpen:
-            if (!inputs.fullyOpen) {
-                enterFault("Open limit was lost while waiting for passage", now);
-            } else if (inputs.passageBlocked) {
+            if (inputs.passageBlocked) {
                 transition(State::VehiclePassing, now);
             } else if (now - stateEnteredAt_ >= config_.passageTimeout) {
                 enterFault("No passage was detected while the barrier was open", now);
@@ -116,9 +101,7 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
             break;
 
         case State::VehiclePassing:
-            if (!inputs.fullyOpen) {
-                enterFault("Open limit was lost while a vehicle was passing", now);
-            } else if (!inputs.passageBlocked) {
+            if (!inputs.passageBlocked) {
                 transition(State::ClearanceWait, now);
             } else if (now - stateEnteredAt_ >= config_.passageTimeout) {
                 enterFault("Passage sensor remained blocked too long", now);
@@ -126,9 +109,7 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
             break;
 
         case State::ClearanceWait:
-            if (!inputs.fullyOpen) {
-                enterFault("Open limit was lost during passage clearance", now);
-            } else if (inputs.passageBlocked) {
+            if (inputs.passageBlocked) {
                 transition(State::VehiclePassing, now);
             } else if (now - stateEnteredAt_ >= config_.clearanceTime) {
                 transition(State::Closing, now);
@@ -138,17 +119,13 @@ Snapshot Controller::update(TimePoint now, const Inputs& inputs) {
         case State::Closing:
             if (inputs.passageBlocked) {
                 transition(State::Opening, now);
-            } else if (inputs.fullyClosed) {
+            } else if (now - stateEnteredAt_ >= config_.closingTravelTime) {
                 transition(State::Rearming, now);
-            } else if (now - stateEnteredAt_ >= config_.closingTimeout) {
-                enterFault("Barrier did not reach the closed limit", now);
             }
             break;
 
         case State::Rearming:
-            if (!inputs.fullyClosed) {
-                enterFault("Closed limit was lost while rearming", now);
-            } else if (inputStableFor(
+            if (inputStableFor(
                 inputs.loopPresent,
                 now,
                 loopOccupiedSince_,
@@ -192,8 +169,7 @@ bool Controller::recognitionCompleted(
 }
 
 bool Controller::acknowledgeFault(TimePoint now, const Inputs& inputs) {
-    if (state_ != State::Fault || inputs.barrierFault || inputs.passageBlocked ||
-        inputs.fullyOpen || !inputs.fullyClosed) {
+    if (state_ != State::Fault || inputs.passageBlocked) {
         return false;
     }
     faultReason_.clear();
@@ -206,8 +182,7 @@ Snapshot Controller::snapshot(TimePoint now, const Inputs& inputs) const {
     const bool authorizedMovement = state_ == State::Opening ||
         state_ == State::GateOpen || state_ == State::VehiclePassing ||
         state_ == State::ClearanceWait;
-    outputs.redLight = !authorizedMovement;
-    outputs.greenLight = authorizedMovement;
+    outputs.trafficGreen = authorizedMovement;
     outputs.requestOpen = state_ == State::Opening && now < relayPulseEndsAt_;
     outputs.requestClose = state_ == State::Closing && now < relayPulseEndsAt_ &&
         !inputs.passageBlocked;

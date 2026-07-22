@@ -9,7 +9,9 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +20,10 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #ifdef PLATE_ENABLE_CAMERA
+#include "gate_controller.hpp"
+#ifdef PLATE_ENABLE_GPIO
+#include "gate_gpio.hpp"
+#endif
 #include <curl/curl.h>
 #include <opencv2/highgui.hpp>
 #include <opencv2/videoio.hpp>
@@ -289,15 +295,19 @@ std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
     // then reject smaller slogans, logos, borders, and stickers by component
     // size. Geometry-only cropping remains as a fallback for poor lighting.
     const cv::Mat registrationBand = isolateRegistrationCharacters(aligned, correctedSkew);
+    cv::Mat grayscaleBand;
+    cv::cvtColor(registrationBand, grayscaleBand, cv::COLOR_BGR2GRAY);
+    cv::Mat grayscaleOcrInput;
+    cv::cvtColor(grayscaleBand, grayscaleOcrInput, cv::COLOR_GRAY2BGR);
 
-    const double ratio = static_cast<double>(registrationBand.cols) / registrationBand.rows;
+    const double ratio = static_cast<double>(grayscaleOcrInput.cols) / grayscaleOcrInput.rows;
     const int resizedWidth = std::min(
         inputWidth,
         static_cast<int>(std::ceil(inputHeight * ratio))
     );
 
     cv::Mat resized;
-    cv::resize(registrationBand, resized, cv::Size(resizedWidth, inputHeight));
+    cv::resize(grayscaleOcrInput, resized, cv::Size(resizedWidth, inputHeight));
     resized.convertTo(resized, CV_32FC3, 1.0 / 127.5, -1.0);
     cv::Mat padded(inputHeight, inputWidth, CV_32FC3, cv::Scalar(0, 0, 0));
     resized.copyTo(padded(cv::Rect(0, 0, resizedWidth, inputHeight)));
@@ -563,15 +573,14 @@ size_t appendHttpResponse(char* data, size_t size, size_t count, void* target) {
 
 bool sendRecognition(
     const std::string& serverUrl,
-    const std::string& apiKey,
     const std::string& plate,
     float detectorConfidence,
     const fs::path& cropPath,
     long commandId,
     std::string& responseBody
 ) {
-    if (serverUrl.empty() || apiKey.empty()) {
-        responseBody = "PLATE_SERVER_URL or PLATE_API_KEY is not configured";
+    if (serverUrl.empty()) {
+        responseBody = "PLATE_SERVER_URL is not configured";
         return false;
     }
     CURL* client = curl_easy_init();
@@ -586,8 +595,6 @@ bool sendRecognition(
     }
     endpoint += "/api/reader/recognitions";
     const std::string confidence = std::to_string(detectorConfidence);
-    const std::string apiHeader = "X-API-Key: " + apiKey;
-    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
     curl_mime* form = curl_mime_init(client);
 
     curl_mimepart* part = curl_mime_addpart(form);
@@ -608,7 +615,6 @@ bool sendRecognition(
     curl_mime_filedata(part, cropPath.string().c_str());
 
     curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
-    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(client, CURLOPT_MIMEPOST, form);
     curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
     curl_easy_setopt(client, CURLOPT_TIMEOUT_MS, 15000L);
@@ -622,7 +628,6 @@ bool sendRecognition(
         responseBody = curl_easy_strerror(result);
     }
     curl_mime_free(form);
-    curl_slist_free_all(headers);
     curl_easy_cleanup(client);
     return result == CURLE_OK && status >= 200 && status < 300;
 }
@@ -670,16 +675,52 @@ bool parseJsonLong(const std::string& body, const std::string& field, long& valu
     }
 }
 
+bool parseJsonBool(const std::string& body, const std::string& field, bool& value) {
+    const std::string key = "\"" + field + "\"";
+    std::size_t position = body.find(key);
+    if (position == std::string::npos) {
+        return false;
+    }
+    position = body.find(':', position + key.size());
+    if (position == std::string::npos) {
+        return false;
+    }
+    ++position;
+    while (position < body.size() && std::isspace(static_cast<unsigned char>(body[position]))) {
+        ++position;
+    }
+    if (body.compare(position, 4, "true") == 0) {
+        value = true;
+        return true;
+    }
+    if (body.compare(position, 5, "false") == 0) {
+        value = false;
+        return true;
+    }
+    return false;
+}
+
+long environmentLong(const char* name, long fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return std::stol(raw);
+    } catch (const std::exception&) {
+        throw std::runtime_error(std::string("Invalid numeric value for ") + name);
+    }
+}
+
 RemoteCommandPoll pollRemoteCommand(
     const std::string& serverUrl,
-    const std::string& apiKey,
     long& commandId,
     std::string& errorMessage
 ) {
     commandId = 0;
     errorMessage.clear();
-    if (serverUrl.empty() || apiKey.empty()) {
-        errorMessage = "PLATE_SERVER_URL or PLATE_API_KEY is not configured";
+    if (serverUrl.empty()) {
+        errorMessage = "PLATE_SERVER_URL is not configured";
         return RemoteCommandPoll::Error;
     }
 
@@ -690,10 +731,7 @@ RemoteCommandPoll pollRemoteCommand(
     }
     std::string responseBody;
     const std::string endpoint = serverEndpoint(serverUrl, "/api/reader/commands/next");
-    const std::string apiHeader = "X-API-Key: " + apiKey;
-    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
     curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
-    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(client, CURLOPT_POST, 1L);
     curl_easy_setopt(client, CURLOPT_POSTFIELDS, "");
     curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
@@ -704,7 +742,6 @@ RemoteCommandPoll pollRemoteCommand(
     const CURLcode result = curl_easy_perform(client);
     long status = 0;
     curl_easy_getinfo(client, CURLINFO_RESPONSE_CODE, &status);
-    curl_slist_free_all(headers);
     curl_easy_cleanup(client);
 
     if (result != CURLE_OK) {
@@ -730,7 +767,6 @@ RemoteCommandPoll pollRemoteCommand(
 
 bool reportRemoteCommand(
     const std::string& serverUrl,
-    const std::string& apiKey,
     long commandId,
     bool success,
     const std::string& message,
@@ -751,8 +787,6 @@ bool reportRemoteCommand(
         serverUrl,
         "/api/reader/commands/" + std::to_string(commandId) + "/complete"
     );
-    const std::string apiHeader = "X-API-Key: " + apiKey;
-    curl_slist* headers = curl_slist_append(nullptr, apiHeader.c_str());
     curl_mime* form = curl_mime_init(client);
     curl_mimepart* part = curl_mime_addpart(form);
     curl_mime_name(part, "status");
@@ -780,7 +814,6 @@ bool reportRemoteCommand(
 
     std::string responseBody;
     curl_easy_setopt(client, CURLOPT_URL, endpoint.c_str());
-    curl_easy_setopt(client, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(client, CURLOPT_MIMEPOST, form);
     curl_easy_setopt(client, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
     curl_easy_setopt(client, CURLOPT_TIMEOUT_MS, 10000L);
@@ -790,7 +823,6 @@ bool reportRemoteCommand(
     long status = 0;
     curl_easy_getinfo(client, CURLINFO_RESPONSE_CODE, &status);
     curl_mime_free(form);
-    curl_slist_free_all(headers);
     curl_easy_cleanup(client);
     return result == CURLE_OK && status >= 200 && status < 300;
 }
@@ -816,10 +848,10 @@ int runCamera(
     int cameraIndex,
     const fs::path& outputDirectory,
     const std::string& serverUrl,
-    const std::string& apiKey,
     bool headless,
     const fs::path& commandFile,
-    bool remoteCommands
+    bool remoteCommands,
+    bool gateMode
 ) {
     std::cout << std::unitbuf;
     cv::VideoCapture camera;
@@ -852,8 +884,74 @@ int runCamera(
     if (!headless) {
         cv::namedWindow("On-demand License Plate Recognition", cv::WINDOW_NORMAL);
     }
+
+    std::unique_ptr<gate::Controller> gateController;
+#ifdef PLATE_ENABLE_GPIO
+    std::unique_ptr<gate::RaspberryPiGpio> gateGpio;
+#endif
+    gate::State previousGateState = gate::State::Startup;
+    if (gateMode) {
+#ifdef PLATE_ENABLE_GPIO
+        try {
+        gate::Config gateConfig;
+        gateConfig.inputDebounce = gate::Milliseconds(environmentLong(
+            "GATE_INPUT_DEBOUNCE_MS", gateConfig.inputDebounce.count()
+        ));
+        gateConfig.relayPulse = gate::Milliseconds(environmentLong(
+            "GATE_RELAY_PULSE_MS", 1000
+        ));
+        gateConfig.recognitionTimeout = gate::Milliseconds(environmentLong(
+            "GATE_RECOGNITION_TIMEOUT_MS", gateConfig.recognitionTimeout.count()
+        ));
+        gateConfig.openingTravelTime = gate::Milliseconds(environmentLong(
+            "GATE_OPENING_TRAVEL_MS", gateConfig.openingTravelTime.count()
+        ));
+        gateConfig.passageTimeout = gate::Milliseconds(environmentLong(
+            "GATE_PASSAGE_TIMEOUT_MS", gateConfig.passageTimeout.count()
+        ));
+        gateConfig.clearanceTime = gate::Milliseconds(environmentLong(
+            "GATE_CLEARANCE_MS", gateConfig.clearanceTime.count()
+        ));
+        gateConfig.closingTravelTime = gate::Milliseconds(environmentLong(
+            "GATE_CLOSING_TRAVEL_MS", gateConfig.closingTravelTime.count()
+        ));
+        gate::GpioPins pins;
+        pins.loop = static_cast<unsigned int>(environmentLong("GATE_LOOP_GPIO", 17));
+        pins.passage = static_cast<unsigned int>(environmentLong("GATE_PASSAGE_GPIO", 27));
+        pins.traffic = static_cast<unsigned int>(environmentLong("GATE_TRAFFIC_GPIO", 22));
+        pins.open = static_cast<unsigned int>(environmentLong("GATE_OPEN_GPIO", 23));
+        pins.close = static_cast<unsigned int>(environmentLong("GATE_CLOSE_GPIO", 24));
+        const std::string chipPath = std::getenv("GATE_GPIO_CHIP")
+            ? std::getenv("GATE_GPIO_CHIP")
+            : "/dev/gpiochip0";
+        gateController = std::make_unique<gate::Controller>(gateConfig);
+        gateGpio = std::make_unique<gate::RaspberryPiGpio>(chipPath, pins);
+        const auto initialInputs = gateGpio->readInputs();
+        const auto initialStatus = gateController->update(
+            std::chrono::steady_clock::now(), initialInputs
+        );
+        gateGpio->applyOutputs(initialStatus.outputs);
+        previousGateState = initialStatus.state;
+        std::cout << "Gate GPIO ready: loop=" << pins.loop
+                  << " IR=" << pins.passage
+                  << " traffic=" << pins.traffic
+                  << " open=" << pins.open
+                  << " close=" << pins.close << ".\n";
+        } catch (const std::exception& error) {
+            std::cerr << "Unable to start gate GPIO: " << error.what() << '\n';
+            camera.release();
+            return 1;
+        }
+#else
+        std::cerr << "Gate mode requested, but GPIO support was not built.\n";
+        camera.release();
+        return 1;
+#endif
+    }
     std::cout << "Camera ready in on-demand mode. YOLO and OCR are idle.\n";
-    if (remoteCommands) {
+    if (gateMode) {
+        std::cout << "Waiting for a grounded inductive-loop input.\n";
+    } else if (remoteCommands) {
         std::cout << "Waiting for Capture requests from the website.\n";
     } else {
         std::cout << "Commands: capture | status | help | quit\n";
@@ -867,13 +965,42 @@ int runCamera(
     while (true) {
         command.clear();
         long activeCommandId = 0;
-        if (remoteCommands) {
+        if (gateMode) {
+#ifdef PLATE_ENABLE_GPIO
+            while (command.empty()) {
+                try {
+                    const gate::Inputs inputs = gateGpio->readInputs();
+                    const gate::Snapshot status = gateController->update(
+                        std::chrono::steady_clock::now(), inputs
+                    );
+                    gateGpio->applyOutputs(status.outputs);
+                    if (status.state != previousGateState) {
+                        std::cout << "GATE STATE: " << gate::stateName(previousGateState)
+                                  << " -> " << gate::stateName(status.state) << '\n';
+                        if (!status.faultReason.empty()) {
+                            std::cerr << "GATE FAULT: " << status.faultReason << '\n';
+                        }
+                        previousGateState = status.state;
+                    }
+                    if (status.state == gate::State::Recognizing) {
+                        command = "capture";
+                    } else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    }
+                } catch (const std::exception& error) {
+                    gateGpio->safeOutputs();
+                    std::cerr << "GATE GPIO FAILURE: " << error.what() << '\n';
+                    camera.release();
+                    return 1;
+                }
+            }
+#endif
+        } else if (remoteCommands) {
             auto lastError = std::chrono::steady_clock::time_point{};
             while (command.empty()) {
                 std::string pollError;
                 const RemoteCommandPoll result = pollRemoteCommand(
                     serverUrl,
-                    apiKey,
                     activeCommandId,
                     pollError
                 );
@@ -925,7 +1052,7 @@ int runCamera(
         }
         if (command == "help") {
             std::cout
-                << "capture  Grab one fresh frame and run YOLO/OCR on its best plate crop.\n"
+                << "capture  Grab three fresh frames and run grayscale OCR consensus.\n"
                 << "status   Show whether the camera and models are idle.\n"
                 << "quit     Release the camera and stop the reader.\n";
             continue;
@@ -947,10 +1074,10 @@ int runCamera(
         const auto millisecondsBetween = [](const auto& beginning, const auto& end) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(end - beginning).count();
         };
-        constexpr int captureFrameCount = 1;
-        constexpr int ocrCandidateCount = 1;
+        constexpr int captureFrameCount = 3;
+        constexpr int ocrCandidateCount = 3;
         std::cout << "CAPTURE " << captureNumber << ": acquiring "
-                  << captureFrameCount << " fresh camera frame...\n";
+                  << captureFrameCount << " fresh camera frames...\n";
 
         // A camera that remains open while idle may have queued old frames.
         // Flush those buffers, then retain only a short in-memory burst.
@@ -976,7 +1103,6 @@ int runCamera(
                       << " ms.\n";
             reportRemoteCommand(
                 serverUrl,
-                apiKey,
                 activeCommandId,
                 false,
                 "Camera burst could not be read",
@@ -986,11 +1112,19 @@ int runCamera(
                 0,
                 millisecondsBetween(startedAt, failedAt)
             );
+            if (gateMode) {
+                gateController->recognitionCompleted(
+                    std::chrono::steady_clock::now(),
+                    false,
+                    true,
+                    "Camera burst could not be read"
+                );
+            }
             continue;
         }
         std::cout << "CAPTURE " << captureNumber << ": captured "
                   << frames.size() << '/' << captureFrameCount
-                  << " frame; running YOLO...\n";
+                  << " frames; running YOLO...\n";
         const auto framesCapturedAt = std::chrono::steady_clock::now();
         const std::string captureStem = fs::path(
             eventSnapshotName("CAPTURE", captureNumber)
@@ -1038,7 +1172,7 @@ int runCamera(
             const auto completedAt = std::chrono::steady_clock::now();
             const auto elapsed = millisecondsBetween(startedAt, completedAt);
             std::cout << "CAPTURE " << captureNumber
-                      << ": NO PLATE DETECTED IN THE CAPTURED FRAME.\n";
+                      << ": NO PLATE DETECTED IN THE CAPTURED FRAMES.\n";
             std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
                       << millisecondsBetween(startedAt, framesCapturedAt)
                       << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
@@ -1047,7 +1181,6 @@ int runCamera(
                       << elapsed << " ms; returning to IDLE.\n";
             reportRemoteCommand(
                 serverUrl,
-                apiKey,
                 activeCommandId,
                 true,
                 "No plate detected",
@@ -1057,6 +1190,12 @@ int runCamera(
                 0,
                 elapsed
             );
+            if (gateMode) {
+                gateController->recognitionCompleted(
+                    std::chrono::steady_clock::now(), false
+                );
+                std::cout << "GATE DECISION: denied because no plate was detected.\n";
+            }
             continue;
         }
 
@@ -1118,6 +1257,7 @@ int runCamera(
 
         long long serverMilliseconds = 0;
         bool serverSent = false;
+        bool authorizedByServer = false;
         std::string serverResultMessage = "OCR returned unreadable";
         if (plate == "UNREADABLE") {
             std::cout << "UNREADABLE - plate regions were detected but the OCR burst "
@@ -1127,7 +1267,6 @@ int runCamera(
             const auto serverStartedAt = std::chrono::steady_clock::now();
             serverSent = sendRecognition(
                 serverUrl,
-                apiKey,
                 plate,
                 winner.detection.confidence,
                 cropPath,
@@ -1141,6 +1280,10 @@ int runCamera(
             if (serverSent) {
                 std::cout << "SERVER ACCEPTED " << plate << ' ' << serverResponse << '\n';
                 serverResultMessage = "Recognized " + plate;
+                if (!parseJsonBool(serverResponse, "authorized", authorizedByServer)) {
+                    authorizedByServer = false;
+                    std::cerr << "SERVER RESPONSE DID NOT INCLUDE AUTHORIZATION; access denied.\n";
+                }
             } else {
                 std::cerr << "SERVER SEND FAILED " << plate << ": "
                           << serverResponse << '\n';
@@ -1161,10 +1304,9 @@ int runCamera(
                   << " ms, server=" << serverMilliseconds
                   << " ms, total=" << elapsed << " ms.\n";
         std::cout << "CAPTURE " << captureNumber << ": complete in "
-                  << elapsed << " ms; captured frame discarded, returning to IDLE.\n";
+                  << elapsed << " ms; captured frames discarded, returning to IDLE.\n";
         reportRemoteCommand(
             serverUrl,
-            apiKey,
             activeCommandId,
             plate == "UNREADABLE" || serverSent,
             serverResultMessage,
@@ -1174,6 +1316,17 @@ int runCamera(
             serverMilliseconds,
             elapsed
         );
+        if (gateMode) {
+            gateController->recognitionCompleted(
+                std::chrono::steady_clock::now(),
+                plate != "UNREADABLE" && serverSent && authorizedByServer
+            );
+            std::cout << "GATE DECISION: "
+                      << (plate != "UNREADABLE" && serverSent && authorizedByServer
+                          ? "AUTHORIZED - switching green and pulsing OPEN."
+                          : "DENIED - remaining red with no barrier pulse.")
+                      << '\n';
+        }
     }
 
     camera.release();
@@ -1196,6 +1349,11 @@ int main(int argc, char** argv) {
         argv + argc,
         [](const char* argument) { return std::string(argument) == "--remote-commands"; }
     ) != argv + argc;
+    const bool gateMode = std::find_if(
+        argv + 1,
+        argv + argc,
+        [](const char* argument) { return std::string(argument) == "--gate"; }
+    ) != argv + argc;
     const int cameraIndex = cameraMode && argc > 2 ? std::stoi(argv[2]) : 0;
     const fs::path inputDirectory = cameraMode
         ? "raw-images"
@@ -1213,16 +1371,11 @@ int main(int argc, char** argv) {
     std::string serverUrl = std::getenv("PLATE_SERVER_URL")
         ? std::getenv("PLATE_SERVER_URL")
         : "";
-    std::string apiKey = std::getenv("PLATE_API_KEY")
-        ? std::getenv("PLATE_API_KEY")
-        : "";
     for (int index = 1; index + 1 < argc; ++index) {
         if (std::string(argv[index]) == "--command-file") {
             commandFile = argv[index + 1];
         } else if (std::string(argv[index]) == "--server-url") {
             serverUrl = argv[index + 1];
-        } else if (std::string(argv[index]) == "--api-key") {
-            apiKey = argv[index + 1];
         }
     }
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
@@ -1242,10 +1395,10 @@ int main(int argc, char** argv) {
             cameraIndex,
             outputDirectory,
             serverUrl,
-            apiKey,
             headless,
             commandFile,
-            remoteCommands
+            remoteCommands,
+            gateMode
         );
 #else
         std::cerr << "Camera support was disabled when this executable was built.\n";

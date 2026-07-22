@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(PLATE_ENABLE_CAMERA "Build real-time camera support" ON)
 option(PLATE_RASPBERRY_PI "Tune the build for Raspberry Pi 4" OFF)
+option(PLATE_ENABLE_GPIO "Build Raspberry Pi gate GPIO support" OFF)
 
 set(PLATE_OPENCV_COMPONENTS core imgproc imgcodecs dnn)
 if(PLATE_ENABLE_CAMERA)
@@ -29,6 +30,20 @@ endif()
 
 add_library(gate_control src/gate_controller.cpp)
 target_include_directories(gate_control PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(plate_reader PRIVATE gate_control)
+
+if(PLATE_ENABLE_GPIO)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GPIOD REQUIRED IMPORTED_TARGET libgpiod)
+    target_sources(plate_reader PRIVATE src/gate_gpio.cpp)
+    target_compile_definitions(plate_reader PRIVATE PLATE_ENABLE_GPIO=1)
+    if(GPIOD_VERSION VERSION_LESS "2.0")
+        target_compile_definitions(plate_reader PRIVATE PLATE_GPIOD_V1=1)
+    else()
+        target_compile_definitions(plate_reader PRIVATE PLATE_GPIOD_V2=1)
+    endif()
+    target_link_libraries(plate_reader PRIVATE PkgConfig::GPIOD)
+endif()
 
 add_executable(gate_simulator src/gate_simulator.cpp)
 target_link_libraries(gate_simulator PRIVATE gate_control)
