@@ -60,7 +60,9 @@ plate-program identity and health endpoint, asks for the camera, builds
 and tests everything, installs GPIO permissions, and starts the reader as a
 background system service. It supports both Raspberry Pi OS Bookworm and Trixie;
 if the operating system's OpenCV is too old, it builds the required minimal
-OpenCV 4.10 installation automatically.
+OpenCV 4.10 installation automatically. Long compiler output is kept out of the
+terminal and saved to `/var/log/plate-controller-install.log`; if setup fails,
+the installer prints the useful final part of that log automatically.
 
 If the PC server has not been installed yet, the Pi setup still completes but
 leaves the controller safely stopped. After setting up the server, run:

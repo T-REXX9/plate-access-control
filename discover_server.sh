@@ -8,7 +8,7 @@ command -v nmap >/dev/null 2>&1 || exit 0
 networks=()
 while read -r address; do
     address="${address%%/*}"
-    IFS=. read -r first second third fourth <<<"$address"
+    IFS=. read -r first second third _ <<<"$address"
     if [[ -n "${first:-}" && -n "${second:-}" && -n "${third:-}" ]]; then
         networks+=("$first.$second.$third.0/24")
     fi
