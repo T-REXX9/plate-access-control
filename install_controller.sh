@@ -100,7 +100,11 @@ fi
 source /etc/os-release
 os_codename="${VERSION_CODENAME:-}"
 if [[ "${PLATE_ALLOW_NON_PI:-0}" != "1" ]]; then
-    if [[ "${ID:-}" != "raspbian" && "${ID_LIKE:-}" != *debian* ]]; then
+    # Official 64-bit Raspberry Pi OS identifies itself as ID=debian, while
+    # the 32-bit image identifies itself as ID=raspbian with ID_LIKE=debian.
+    if [[ "${ID:-}" != "debian" &&
+          "${ID:-}" != "raspbian" &&
+          "${ID_LIKE:-}" != *debian* ]]; then
         echo "This installer supports Raspberry Pi OS only." >&2
         exit 1
     fi
