@@ -59,6 +59,20 @@ while true; do
     break
 done
 
+camera_width=3840
+camera_height=2160
+camera_fps=30
+camera_fourcc=MJPG
+echo
+echo "Using the EMEET C950 4K profile: 3840x2160, MJPEG, 30 FPS, autofocus."
+if [[ "$(uname -s)" == "Linux" ]] && command -v v4l2-ctl >/dev/null 2>&1; then
+    if ! v4l2-ctl --device "/dev/video$camera_index" --list-formats-ext 2>/dev/null |
+        grep -qE '3840x2160|4096x2160'; then
+        echo "Warning: /dev/video$camera_index did not advertise a 4K capture mode."
+        echo "If the webcam exposes several video devices, select its 4K-capable index."
+    fi
+fi
+
 read -r -p "Enable automatic GPIO gate mode? [y/N]: " gate_answer
 case "${gate_answer:-n}" in
     y|Y|yes|YES)
@@ -76,8 +90,9 @@ esac
 
 mkdir -p "$(dirname "$config_path")"
 umask 077
-printf 'PLATE_SERVER_URL=%s\nCAMERA_INDEX=%s\nGATE_MODE=%s\n' \
-    "$server_url" "$camera_index" "$gate_mode" > "$config_path"
+printf 'PLATE_SERVER_URL=%s\nCAMERA_INDEX=%s\nCAMERA_WIDTH=%s\nCAMERA_HEIGHT=%s\nCAMERA_FPS=%s\nCAMERA_FOURCC=%s\nGATE_MODE=%s\n' \
+    "$server_url" "$camera_index" "$camera_width" "$camera_height" \
+    "$camera_fps" "$camera_fourcc" "$gate_mode" > "$config_path"
 chmod 600 "$config_path"
 
 if curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \

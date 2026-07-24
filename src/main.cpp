@@ -854,6 +854,37 @@ int runCamera(
     bool gateMode
 ) {
     std::cout << std::unitbuf;
+    int requestedWidth = 3840;
+    int requestedHeight = 2160;
+    int requestedFps = 30;
+    std::string requestedFourcc = "MJPG";
+    try {
+        requestedWidth = static_cast<int>(environmentLong("CAMERA_WIDTH", requestedWidth));
+        requestedHeight = static_cast<int>(environmentLong("CAMERA_HEIGHT", requestedHeight));
+        requestedFps = static_cast<int>(environmentLong("CAMERA_FPS", requestedFps));
+    } catch (const std::exception& error) {
+        std::cerr << "Invalid camera configuration: " << error.what() << '\n';
+        return 1;
+    }
+    if (const char* configuredFourcc = std::getenv("CAMERA_FOURCC")) {
+        requestedFourcc = configuredFourcc;
+    }
+    std::transform(
+        requestedFourcc.begin(),
+        requestedFourcc.end(),
+        requestedFourcc.begin(),
+        [](unsigned char character) {
+            return static_cast<char>(std::toupper(character));
+        }
+    );
+    if (requestedWidth <= 0 || requestedHeight <= 0 || requestedFps <= 0 ||
+        requestedFourcc.size() != 4) {
+        std::cerr
+            << "Camera settings require positive width, height, and FPS values, "
+            << "plus a four-character CAMERA_FOURCC value.\n";
+        return 1;
+    }
+
     cv::VideoCapture camera;
 #ifdef __APPLE__
     camera.open(cameraIndex, cv::CAP_AVFOUNDATION);
@@ -868,9 +899,63 @@ int runCamera(
         return 1;
     }
 
-    camera.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-    camera.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    const int requestedFourccCode = cv::VideoWriter::fourcc(
+        requestedFourcc[0],
+        requestedFourcc[1],
+        requestedFourcc[2],
+        requestedFourcc[3]
+    );
+#ifndef __APPLE__
+    // The EMEET C950 4K supports 3840x2160 at 30 FPS and exposes compressed
+    // MJPEG through UVC. Select the format before the dimensions so V4L2 does
+    // not fall back to a lower uncompressed mode because of USB bandwidth.
+    camera.set(cv::CAP_PROP_FOURCC, requestedFourccCode);
+#endif
+    camera.set(cv::CAP_PROP_FRAME_WIDTH, requestedWidth);
+    camera.set(cv::CAP_PROP_FRAME_HEIGHT, requestedHeight);
+    camera.set(cv::CAP_PROP_FPS, requestedFps);
+    camera.set(cv::CAP_PROP_AUTOFOCUS, 1);
     camera.set(cv::CAP_PROP_BUFFERSIZE, 1);
+
+    cv::Mat cameraProbe;
+    if (!camera.read(cameraProbe) || cameraProbe.empty()) {
+        std::cerr << "Camera opened, but its first frame could not be read.\n";
+        camera.release();
+        return 1;
+    }
+    const int actualWidth = cameraProbe.cols;
+    const int actualHeight = cameraProbe.rows;
+    const double actualFps = camera.get(cv::CAP_PROP_FPS);
+    const int actualFourccCode = static_cast<int>(camera.get(cv::CAP_PROP_FOURCC));
+    std::string actualFourcc(4, ' ');
+    for (int index = 0; index < 4; ++index) {
+        const unsigned char value = static_cast<unsigned char>(
+            (actualFourccCode >> (index * 8)) & 0xff
+        );
+        actualFourcc[index] = std::isprint(value)
+            ? static_cast<char>(value)
+            : '?';
+    }
+    std::cout << "Camera mode requested: " << requestedWidth << 'x'
+              << requestedHeight << " @ " << requestedFps << " FPS, "
+              << requestedFourcc << ".\n";
+    std::cout << "Camera mode active: " << actualWidth << 'x' << actualHeight;
+    if (actualFps > 0.0) {
+        std::cout << " @ " << std::fixed << std::setprecision(1)
+                  << actualFps << " FPS";
+    }
+    if (actualFourccCode != 0) {
+        std::cout << ", " << actualFourcc;
+    }
+    std::cout << ".\n";
+    if (actualWidth != requestedWidth || actualHeight != requestedHeight) {
+        std::cerr
+            << "WARNING: the webcam did not provide the requested resolution; "
+            << "processing will continue at " << actualWidth << 'x' << actualHeight
+            << ". Check the selected /dev/video device and its supported modes "
+            << "with v4l2-ctl --list-formats-ext.\n";
+    }
+
     fs::create_directories(outputDirectory);
     const fs::path cropDirectory = outputDirectory / "Plate-Crops";
     fs::create_directories(cropDirectory);

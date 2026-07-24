@@ -16,6 +16,10 @@ set +a
 
 : "${PLATE_SERVER_URL:?PLATE_SERVER_URL is missing from .env}"
 : "${CAMERA_INDEX:=0}"
+: "${CAMERA_WIDTH:=3840}"
+: "${CAMERA_HEIGHT:=2160}"
+: "${CAMERA_FPS:=30}"
+: "${CAMERA_FOURCC:=MJPG}"
 : "${GATE_MODE:=0}"
 : "${PLATE_OUTPUT_DIR:=$project_dir/Output}"
 
@@ -23,9 +27,19 @@ if [[ "$GATE_MODE" != "0" && "$GATE_MODE" != "1" ]]; then
     echo "GATE_MODE must be 0 or 1."
     exit 1
 fi
+if [[ ! "$CAMERA_WIDTH" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$CAMERA_HEIGHT" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "$CAMERA_FPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CAMERA_WIDTH, CAMERA_HEIGHT, and CAMERA_FPS must be positive integers."
+    exit 1
+fi
+if [[ ${#CAMERA_FOURCC} -ne 4 ]]; then
+    echo "CAMERA_FOURCC must contain exactly four characters, such as MJPG."
+    exit 1
+fi
 
 PLATE_SERVER_URL="${PLATE_SERVER_URL%/}"
-export PLATE_SERVER_URL CAMERA_INDEX
+export PLATE_SERVER_URL CAMERA_INDEX CAMERA_WIDTH CAMERA_HEIGHT CAMERA_FPS CAMERA_FOURCC
 mkdir -p "$PLATE_OUTPUT_DIR"
 
 if ! curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
@@ -54,9 +68,9 @@ echo "PC website connected: $PLATE_SERVER_URL"
 mode_argument="--remote-commands"
 if [[ "$GATE_MODE" == "1" ]]; then
     mode_argument="--gate"
-    echo "Starting automatic gate mode on camera $CAMERA_INDEX."
+    echo "Starting automatic gate mode on camera $CAMERA_INDEX at ${CAMERA_WIDTH}x${CAMERA_HEIGHT}."
 else
-    echo "Starting camera $CAMERA_INDEX in idle mode; Capture requests come from the website."
+    echo "Starting camera $CAMERA_INDEX at ${CAMERA_WIDTH}x${CAMERA_HEIGHT} in idle mode; Capture requests come from the website."
 fi
 exec "$reader" --camera "$CAMERA_INDEX" \
   models/license_plate_detector.onnx \

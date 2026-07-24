@@ -9,7 +9,7 @@ the separate PC web server and does not host a website or database.
 
 1. Keep the camera open while YOLO and OCR remain idle.
 2. Wait for an administrator to press **Capture plate** on the PC dashboard.
-3. Acquire three fresh frames in memory for that queued request.
+3. Acquire three fresh full-resolution frames in memory for that queued request.
 4. Run YOLO on all three and select the strongest plate region per frame.
 5. Convert each isolated plate region to grayscale and run PP-OCRv5 on it.
 6. Return the final clean alphanumeric value using three-sample OCR consensus.
@@ -104,9 +104,32 @@ On the Raspberry Pi, run:
 
 The setup searches the local network for the website. Confirm the discovered
 address or enter one such as `http://192.168.0.103:8080`, then choose the USB
-camera index. The configuration is stored in a
+camera index. The controller requests the webcam's 3840×2160 MJPEG mode at
+30 FPS and prints both the requested and actually negotiated camera modes when
+it starts. The 4K source frame is retained through plate detection and cropping,
+so OCR receives the maximum plate detail even though YOLO uses its trained
+640×640 inference input. These defaults match the EMEET C950 4K's advertised
+4K/30 FPS mode, and the controller explicitly enables the camera's autofocus.
+The configuration is stored in a
 private `.env` file that Git ignores. The setup checks the website health route
 before accepting the configuration.
+
+The defaults can be changed in the private controller configuration when a
+camera requires a different mode:
+
+```text
+CAMERA_WIDTH=3840
+CAMERA_HEIGHT=2160
+CAMERA_FPS=30
+CAMERA_FOURCC=MJPG
+```
+
+On Raspberry Pi OS, list the exact modes exposed by the selected USB camera
+with:
+
+```bash
+v4l2-ctl --device /dev/video0 --list-formats-ext
+```
 
 Start the reader with:
 
