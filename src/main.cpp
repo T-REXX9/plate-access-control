@@ -261,7 +261,12 @@ cv::Mat isolateRegistrationCharacters(const cv::Mat& aligned, bool correctedSkew
     return aligned(bandBox).clone();
 }
 
-std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
+struct OcrResult {
+    std::string text;
+    double confidence = 0.0;
+};
+
+OcrResult readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
     constexpr int inputHeight = 48;
     constexpr int inputWidth = 320;
     const double skew = estimatePlateSkew(zoomedCrop);
@@ -316,13 +321,15 @@ std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
     recognizer.setInput(blob);
     const cv::Mat output = recognizer.forward();
     if (output.dims != 3 || output.size[0] != 1) {
-        return "UNREADABLE";
+        return {"UNREADABLE", 0.0};
     }
 
     const int timeSteps = output.size[1];
     const int classCount = output.size[2];
     const float* probabilities = output.ptr<float>();
     std::string decoded;
+    double characterConfidence = 0.0;
+    int characterCount = 0;
     int previous = -1;
     for (int step = 0; step < timeSteps; ++step) {
         const float* row = probabilities + step * classCount;
@@ -331,13 +338,21 @@ std::string readPlate(cv::dnn::Net& recognizer, const cv::Mat& zoomedCrop) {
             const char character = paddleCharacter(index);
             if (character != '\0') {
                 decoded.push_back(character);
+                characterConfidence += row[index];
+                ++characterCount;
             }
         }
         previous = index;
     }
 
     const std::string cleaned = cleanPlateText(decoded);
-    return cleaned.empty() ? "UNREADABLE" : cleaned;
+    if (cleaned.empty() || characterCount == 0) {
+        return {"UNREADABLE", 0.0};
+    }
+    return {
+        cleaned,
+        characterConfidence / static_cast<double>(characterCount)
+    };
 }
 
 void drawLabel(
@@ -396,6 +411,7 @@ struct BurstCandidate {
 struct OcrVote {
     std::string reading;
     double quality = 0.0;
+    double ocrConfidence = 0.0;
     std::size_t candidateIndex = 0;
 };
 
@@ -1137,7 +1153,7 @@ int runCamera(
         }
         if (command == "help") {
             std::cout
-                << "capture  Grab three fresh frames and run grayscale OCR consensus.\n"
+                << "capture  Try one 4K frame, then use two fallback frames when uncertain.\n"
                 << "status   Show whether the camera and models are idle.\n"
                 << "quit     Release the camera and stop the reader.\n";
             continue;
@@ -1159,79 +1175,77 @@ int runCamera(
         const auto millisecondsBetween = [](const auto& beginning, const auto& end) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(end - beginning).count();
         };
-        constexpr int captureFrameCount = 3;
+        constexpr int maximumCaptureFrameCount = 3;
         constexpr int ocrCandidateCount = 3;
-        std::cout << "CAPTURE " << captureNumber << ": acquiring "
-                  << captureFrameCount << " fresh camera frames...\n";
+        constexpr double fastPathMinimumQuality = 0.60;
+        constexpr double fastPathMinimumOcrConfidence = 0.90;
+        long long framesMilliseconds = 0;
+        long long yoloMilliseconds = 0;
+        long long ocrMilliseconds = 0;
+        std::cout << "CAPTURE " << captureNumber
+                  << ": acquiring one fresh 4K frame for the adaptive fast path...\n";
 
-        // A camera that remains open while idle may have queued old frames.
-        // Flush those buffers, then retain only a short in-memory burst.
-        cv::Mat discardedFrame;
+        // Drop stale UVC buffers without retrieving and JPEG-decoding pixels
+        // that will never be used. read() below decodes only retained frames.
+        const auto flushStartedAt = std::chrono::steady_clock::now();
         for (int attempt = 0; attempt < 6; ++attempt) {
-            camera.read(discardedFrame);
+            if (!camera.grab()) {
+                break;
+            }
         }
+        framesMilliseconds += millisecondsBetween(
+            flushStartedAt,
+            std::chrono::steady_clock::now()
+        );
+
         std::vector<cv::Mat> frames;
-        frames.reserve(captureFrameCount);
-        for (int index = 0; index < captureFrameCount; ++index) {
-            cv::Mat frame;
-            if (camera.read(frame) && !frame.empty()) {
-                frames.push_back(frame.clone());
-            }
-        }
-        if (frames.empty()) {
-            const auto failedAt = std::chrono::steady_clock::now();
-            std::cerr << "CAPTURE " << captureNumber
-                      << ": camera burst could not be read.\n";
-            std::cerr << "CAPTURE " << captureNumber << " TIMING: frames="
-                      << millisecondsBetween(startedAt, failedAt)
-                      << " ms, total=" << millisecondsBetween(startedAt, failedAt)
-                      << " ms.\n";
-            reportRemoteCommand(
-                serverUrl,
-                activeCommandId,
-                false,
-                "Camera burst could not be read",
-                millisecondsBetween(startedAt, failedAt),
-                0,
-                0,
-                0,
-                millisecondsBetween(startedAt, failedAt)
-            );
-            if (gateMode) {
-                gateController->recognitionCompleted(
-                    std::chrono::steady_clock::now(),
-                    false,
-                    true,
-                    "Camera burst could not be read"
-                );
-            }
-            continue;
-        }
-        std::cout << "CAPTURE " << captureNumber << ": captured "
-                  << frames.size() << '/' << captureFrameCount
-                  << " frames; running YOLO...\n";
-        const auto framesCapturedAt = std::chrono::steady_clock::now();
+        frames.reserve(maximumCaptureFrameCount);
+        std::vector<BurstCandidate> candidates;
         const std::string captureStem = fs::path(
             eventSnapshotName("CAPTURE", captureNumber)
         ).stem().string();
 
-        std::vector<BurstCandidate> candidates;
-        for (std::size_t frameIndex = 0; frameIndex < frames.size(); ++frameIndex) {
-            const cv::Mat& frame = frames[frameIndex];
-            const std::vector<Detection> detections = detectPlates(detector, frame);
+        const auto captureAndDetect = [&]() {
+            const auto frameStartedAt = std::chrono::steady_clock::now();
+            cv::Mat frame;
+            if (!camera.read(frame) || frame.empty()) {
+                framesMilliseconds += millisecondsBetween(
+                    frameStartedAt,
+                    std::chrono::steady_clock::now()
+                );
+                return false;
+            }
+            frames.push_back(frame.clone());
+            framesMilliseconds += millisecondsBetween(
+                frameStartedAt,
+                std::chrono::steady_clock::now()
+            );
+
+            const std::size_t frameIndex = frames.size() - 1;
+            const auto yoloStartedAt = std::chrono::steady_clock::now();
+            const cv::Mat& retainedFrame = frames[frameIndex];
+            const std::vector<Detection> detections = detectPlates(
+                detector,
+                retainedFrame
+            );
+            yoloMilliseconds += millisecondsBetween(
+                yoloStartedAt,
+                std::chrono::steady_clock::now()
+            );
             std::cout << "CAPTURE " << captureNumber << ": frame "
-                      << frameIndex + 1 << '/' << frames.size() << " - YOLO found "
+                      << frameIndex + 1 << '/' << maximumCaptureFrameCount
+                      << " - YOLO found "
                       << detections.size() << " plate region(s).\n";
 
             bool foundFrameCandidate = false;
             BurstCandidate bestFrameCandidate;
             for (const Detection& detection : detections) {
-                const cv::Mat crop = frame(detection.box).clone();
+                const cv::Mat crop = retainedFrame(detection.box).clone();
                 const double sharpness = plateSharpness(crop);
                 const double exposure = plateExposureScore(crop);
                 const double quality = plateCandidateQuality(
                     detection,
-                    frame.size(),
+                    retainedFrame.size(),
                     sharpness,
                     exposure
                 );
@@ -1250,18 +1264,119 @@ int runCamera(
             if (foundFrameCandidate) {
                 candidates.push_back(std::move(bestFrameCandidate));
             }
+            return true;
+        };
+
+        const auto rankCandidates = [&]() {
+            std::sort(candidates.begin(), candidates.end(), [](
+            const BurstCandidate& first,
+            const BurstCandidate& second
+            ) {
+                return first.quality > second.quality;
+            });
+            if (candidates.size() > ocrCandidateCount) {
+                candidates.resize(ocrCandidateCount);
+            }
+        };
+
+        std::vector<OcrVote> votes;
+        const auto readCandidates = [&]() {
+            votes.clear();
+            votes.reserve(candidates.size());
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                const BurstCandidate& candidate = candidates[index];
+                const auto ocrStartedAt = std::chrono::steady_clock::now();
+                const OcrResult result = readPlate(recognizer, candidate.enhancedCrop);
+                ocrMilliseconds += millisecondsBetween(
+                    ocrStartedAt,
+                    std::chrono::steady_clock::now()
+                );
+                votes.push_back({
+                    result.text,
+                    candidate.quality,
+                    result.confidence,
+                    index
+                });
+                std::cout << "CAPTURE " << captureNumber << ": OCR sample "
+                          << index + 1 << '/' << candidates.size()
+                          << " from frame " << candidate.frameIndex + 1
+                          << " = " << result.text
+                          << " (OCR confidence " << std::fixed << std::setprecision(2)
+                          << result.confidence << ", quality " << candidate.quality
+                          << ", sharpness " << std::setprecision(0)
+                          << candidate.sharpness << ")\n";
+            }
+        };
+
+        captureAndDetect();
+        bool usedFastPath = false;
+        if (!candidates.empty()) {
+            rankCandidates();
+            readCandidates();
+            const OcrVote& firstVote = votes.front();
+            usedFastPath =
+                firstVote.reading != "UNREADABLE" &&
+                firstVote.quality >= fastPathMinimumQuality &&
+                firstVote.ocrConfidence >= fastPathMinimumOcrConfidence;
         }
-        const auto yoloFinishedAt = std::chrono::steady_clock::now();
+
+        if (usedFastPath) {
+            std::cout << "CAPTURE " << captureNumber
+                      << ": high-confidence first frame; skipping two fallback frames.\n";
+        } else {
+            std::cout << "CAPTURE " << captureNumber
+                      << ": first frame uncertain; acquiring two fallback frames.\n";
+            for (int attempt = 1; attempt < maximumCaptureFrameCount; ++attempt) {
+                captureAndDetect();
+            }
+            if (!candidates.empty()) {
+                rankCandidates();
+                readCandidates();
+            }
+        }
+
+        if (frames.empty()) {
+            const auto elapsed = millisecondsBetween(
+                startedAt,
+                std::chrono::steady_clock::now()
+            );
+            std::cerr << "CAPTURE " << captureNumber
+                      << ": camera frames could not be read.\n";
+            std::cerr << "CAPTURE " << captureNumber << " TIMING: frames="
+                      << framesMilliseconds << " ms, total=" << elapsed << " ms.\n";
+            reportRemoteCommand(
+                serverUrl,
+                activeCommandId,
+                false,
+                "Camera frames could not be read",
+                framesMilliseconds,
+                yoloMilliseconds,
+                ocrMilliseconds,
+                0,
+                elapsed
+            );
+            if (gateMode) {
+                gateController->recognitionCompleted(
+                    std::chrono::steady_clock::now(),
+                    false,
+                    true,
+                    "Camera frames could not be read"
+                );
+            }
+            continue;
+        }
 
         if (candidates.empty()) {
-            const auto completedAt = std::chrono::steady_clock::now();
-            const auto elapsed = millisecondsBetween(startedAt, completedAt);
+            const auto elapsed = millisecondsBetween(
+                startedAt,
+                std::chrono::steady_clock::now()
+            );
             std::cout << "CAPTURE " << captureNumber
                       << ": NO PLATE DETECTED IN THE CAPTURED FRAMES.\n";
             std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
-                      << millisecondsBetween(startedAt, framesCapturedAt)
-                      << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
-                      << " ms, OCR=0 ms, server=0 ms, total=" << elapsed << " ms.\n";
+                      << framesMilliseconds << " ms, YOLO=" << yoloMilliseconds
+                      << " ms, OCR=" << ocrMilliseconds
+                      << " ms, server=0 ms, total=" << elapsed << " ms.\n";
             std::cout << "CAPTURE " << captureNumber << ": complete in "
                       << elapsed << " ms; returning to IDLE.\n";
             reportRemoteCommand(
@@ -1269,9 +1384,9 @@ int runCamera(
                 activeCommandId,
                 true,
                 "No plate detected",
-                millisecondsBetween(startedAt, framesCapturedAt),
-                millisecondsBetween(framesCapturedAt, yoloFinishedAt),
-                0,
+                framesMilliseconds,
+                yoloMilliseconds,
+                ocrMilliseconds,
                 0,
                 elapsed
             );
@@ -1282,32 +1397,6 @@ int runCamera(
                 std::cout << "GATE DECISION: denied because no plate was detected.\n";
             }
             continue;
-        }
-
-        std::sort(candidates.begin(), candidates.end(), [](
-            const BurstCandidate& first,
-            const BurstCandidate& second
-        ) {
-            return first.quality > second.quality;
-        });
-        if (candidates.size() > ocrCandidateCount) {
-            candidates.resize(ocrCandidateCount);
-        }
-
-        std::vector<OcrVote> votes;
-        votes.reserve(candidates.size());
-        const auto ocrStartedAt = std::chrono::steady_clock::now();
-        for (std::size_t index = 0; index < candidates.size(); ++index) {
-            const BurstCandidate& candidate = candidates[index];
-            const std::string reading = readPlate(recognizer, candidate.enhancedCrop);
-            votes.push_back({reading, candidate.quality, index});
-            std::cout << "CAPTURE " << captureNumber << ": OCR sample "
-                      << index + 1 << '/' << candidates.size()
-                      << " from frame " << candidate.frameIndex + 1
-                      << " = " << reading
-                      << " (quality " << std::fixed << std::setprecision(2)
-                      << candidate.quality << ", sharpness "
-                      << std::setprecision(0) << candidate.sharpness << ")\n";
         }
 
         const std::string plate = consensusPlate(votes);
@@ -1333,7 +1422,6 @@ int runCamera(
             winner.enhancedCrop,
             {cv::IMWRITE_JPEG_QUALITY, 95}
         );
-        const auto ocrFinishedAt = std::chrono::steady_clock::now();
 
         cv::Scalar color(0, 200, 255);
         drawLabel(annotatedFrame, winner.detection.box, plate, color);
@@ -1383,9 +1471,9 @@ int runCamera(
         const auto completedAt = std::chrono::steady_clock::now();
         const auto elapsed = millisecondsBetween(startedAt, completedAt);
         std::cout << "CAPTURE " << captureNumber << " TIMING: frames="
-                  << millisecondsBetween(startedAt, framesCapturedAt)
-                  << " ms, YOLO=" << millisecondsBetween(framesCapturedAt, yoloFinishedAt)
-                  << " ms, OCR=" << millisecondsBetween(ocrStartedAt, ocrFinishedAt)
+                  << framesMilliseconds
+                  << " ms, YOLO=" << yoloMilliseconds
+                  << " ms, OCR=" << ocrMilliseconds
                   << " ms, server=" << serverMilliseconds
                   << " ms, total=" << elapsed << " ms.\n";
         std::cout << "CAPTURE " << captureNumber << ": complete in "
@@ -1395,9 +1483,9 @@ int runCamera(
             activeCommandId,
             plate == "UNREADABLE" || serverSent,
             serverResultMessage,
-            millisecondsBetween(startedAt, framesCapturedAt),
-            millisecondsBetween(framesCapturedAt, yoloFinishedAt),
-            millisecondsBetween(ocrStartedAt, ocrFinishedAt),
+            framesMilliseconds,
+            yoloMilliseconds,
+            ocrMilliseconds,
             serverMilliseconds,
             elapsed
         );
@@ -1515,9 +1603,9 @@ int main(int argc, char** argv) {
                 (path.stem().string() + "_plate_" + std::to_string(index + 1) + ".jpg");
             cv::imwrite(cropPath.string(), zoomed, {cv::IMWRITE_JPEG_QUALITY, 95});
 
-            const std::string text = readPlate(recognizer, zoomed);
-            drawLabel(image, detections[index].box, text);
-            labels.push_back(text);
+            const OcrResult result = readPlate(recognizer, zoomed);
+            drawLabel(image, detections[index].box, result.text);
+            labels.push_back(result.text);
         }
 
         const fs::path target = outputDirectory / path.filename();
