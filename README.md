@@ -11,7 +11,7 @@ the separate PC web server and does not host a website or database.
 2. Wait for an administrator to press **Capture plate** on the PC dashboard.
 3. Acquire one fresh full-resolution frame and run YOLO plus PP-OCRv5.
 4. Return immediately when the first plate crop and OCR probabilities are strong.
-5. When uncertain, acquire two more frames and use three-sample OCR consensus.
+5. When uncertain, acquire one more frame and use two-sample OCR consensus.
 6. Return the final clean alphanumeric value without imposing a plate format.
 7. Store only the winning enhanced crop in `Output/Plate-Crops`.
 8. Send the plate, detector confidence, and crop to the PC server.
@@ -147,7 +147,7 @@ To test only the PC connection without opening the camera:
 ```
 
 Press **Capture plate** on the administrator dashboard. The Pi terminal prints
-whether the one-frame fast path or three-frame fallback was used, the final
+whether the one-frame fast path or two-frame fallback was used, the final
 plate, web server response, and a timing summary for frame capture, YOLO, OCR,
 upload, and total processing time.
 

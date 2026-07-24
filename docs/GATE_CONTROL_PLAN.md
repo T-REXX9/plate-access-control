@@ -19,8 +19,8 @@ stop LOW, which means red traffic indication with no movement request.
 
 1. The controller starts red with both movement outputs LOW.
 2. The inductive-loop switch must remain grounded for the debounce interval.
-3. One cycle is locked and the reader tries one fresh 4K frame, with two
-   additional frames captured only when detection or OCR is uncertain.
+3. One cycle is locked and the reader tries one fresh 4K frame, with one
+   additional frame captured only when detection or OCR is uncertain.
 4. YOLO detects the strongest plate crop in each frame.
 5. Each plate row is converted to grayscale and PP-OCRv5 produces a consensus.
 6. The plate and crop are sent to the PC website for MySQL authorization.

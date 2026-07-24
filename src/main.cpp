@@ -488,6 +488,10 @@ int editDistance(const std::string& first, const std::string& second) {
 }
 
 std::string consensusPlate(const std::vector<OcrVote>& votes) {
+    const auto voteWeight = [](const OcrVote& vote) {
+        return std::max(0.01, vote.quality) *
+            std::max(0.01, vote.ocrConfidence);
+    };
     std::vector<OcrVote> readable;
     for (const OcrVote& vote : votes) {
         if (!vote.reading.empty() && vote.reading != "UNREADABLE") {
@@ -509,7 +513,7 @@ std::string consensusPlate(const std::vector<OcrVote>& votes) {
     for (const OcrVote& vote : readable) {
         VoteTotal& total = exactVotes[vote.reading];
         ++total.count;
-        total.weight += vote.quality;
+        total.weight += voteWeight(vote);
     }
     std::string exactWinner;
     VoteTotal exactWinnerTotal;
@@ -528,7 +532,7 @@ std::string consensusPlate(const std::vector<OcrVote>& votes) {
     for (const OcrVote& vote : readable) {
         VoteTotal& total = lengthVotes[vote.reading.size()];
         ++total.count;
-        total.weight += vote.quality;
+        total.weight += voteWeight(vote);
     }
     std::size_t consensusLength = 0;
     VoteTotal lengthWinnerTotal;
@@ -546,7 +550,7 @@ std::string consensusPlate(const std::vector<OcrVote>& votes) {
             std::map<char, double> characterVotes;
             for (const OcrVote& vote : readable) {
                 if (vote.reading.size() == consensusLength) {
-                    characterVotes[vote.reading[position]] += std::max(0.01, vote.quality);
+                    characterVotes[vote.reading[position]] += voteWeight(vote);
                 }
             }
             const auto winner = std::max_element(
@@ -1153,7 +1157,7 @@ int runCamera(
         }
         if (command == "help") {
             std::cout
-                << "capture  Try one 4K frame, then use two fallback frames when uncertain.\n"
+                << "capture  Try one 4K frame, then use one fallback frame when uncertain.\n"
                 << "status   Show whether the camera and models are idle.\n"
                 << "quit     Release the camera and stop the reader.\n";
             continue;
@@ -1175,8 +1179,8 @@ int runCamera(
         const auto millisecondsBetween = [](const auto& beginning, const auto& end) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(end - beginning).count();
         };
-        constexpr int maximumCaptureFrameCount = 3;
-        constexpr int ocrCandidateCount = 3;
+        constexpr int maximumCaptureFrameCount = 2;
+        constexpr int ocrCandidateCount = 2;
         constexpr double fastPathMinimumQuality = 0.60;
         constexpr double fastPathMinimumOcrConfidence = 0.90;
         long long framesMilliseconds = 0;
@@ -1322,10 +1326,10 @@ int runCamera(
 
         if (usedFastPath) {
             std::cout << "CAPTURE " << captureNumber
-                      << ": high-confidence first frame; skipping two fallback frames.\n";
+                      << ": high-confidence first frame; skipping the fallback frame.\n";
         } else {
             std::cout << "CAPTURE " << captureNumber
-                      << ": first frame uncertain; acquiring two fallback frames.\n";
+                      << ": first frame uncertain; acquiring one fallback frame.\n";
             for (int attempt = 1; attempt < maximumCaptureFrameCount; ++attempt) {
                 captureAndDetect();
             }
@@ -1407,11 +1411,12 @@ int runCamera(
             const int distance = plate == "UNREADABLE" || vote.reading == "UNREADABLE"
                 ? std::numeric_limits<int>::max() / 2
                 : editDistance(vote.reading, plate);
+            const double voteQuality = vote.quality * vote.ocrConfidence;
             if (distance < winnerDistance ||
-                (distance == winnerDistance && vote.quality > winnerQuality)) {
+                (distance == winnerDistance && voteQuality > winnerQuality)) {
                 winnerIndex = vote.candidateIndex;
                 winnerDistance = distance;
-                winnerQuality = vote.quality;
+                winnerQuality = voteQuality;
             }
         }
         const BurstCandidate& winner = candidates[winnerIndex];
